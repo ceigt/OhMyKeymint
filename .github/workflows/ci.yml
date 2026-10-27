@@ -189,6 +189,7 @@ jobs:
       run: |
         # Keep the Android target linker flags from .cargo/config.toml.
         unset RUSTFLAGS
+        python -m unittest discover -s scripts -p 'test_collect_android_tests.py'
         cargo clippy --target aarch64-linux-android --workspace --all-targets -- -D warnings
         cargo fmt --all -- --check
         cargo test --target aarch64-linux-android --workspace --no-run --message-format=json > android-tests.jsonl && test_status=0 || test_status=$?

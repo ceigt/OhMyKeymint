@@ -1,6 +1,7 @@
 """Collect Android tests; execute the host-only procedural macro test on Linux."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -25,7 +26,17 @@ for event in events:
     entry = {"file": binary.name, "sha256": hashlib.sha256(data).hexdigest(), "target": event["target"]["name"]}
     machine = int.from_bytes(data[18:20], "little")
     if machine == 62 and "proc-macro" in event["target"]["kind"]:
-        subprocess.run([str(binary)], check=True)
+        # Cargo normally supplies this search path when it launches host tests.
+        host_environment = os.environ.copy()
+        rust_libraries = subprocess.check_output(
+            ["rustc", "--print", "target-libdir"], text=True
+        ).strip()
+        if not Path(rust_libraries).is_dir():
+            raise SystemExit("Host Rust shared-library directory is unavailable")
+        host_environment["LD_LIBRARY_PATH"] = os.pathsep.join(
+            part for part in [rust_libraries, host_environment.get("LD_LIBRARY_PATH", "")] if part
+        )
+        subprocess.run([str(binary)], check=True, env=host_environment)
         host_tests.append(entry)
     elif machine == 183:
         shutil.copy2(binary, destination / binary.name)
