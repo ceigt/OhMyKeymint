@@ -118,6 +118,7 @@ jobs:
       run: |
         pnpm --dir webui install --frozen-lockfile
         node --experimental-strip-types webui/src/rkp_renewal.test.mjs
+        node --experimental-strip-types webui/vite.config.test.mjs
         pnpm --dir webui build
 
     - name: Verify committed WebUI build

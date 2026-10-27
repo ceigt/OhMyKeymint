@@ -58,3 +58,5 @@ process restart, system reboot or claim of STRONG success is part of renewal.
 Validation: Android arm64 compilation, Clippy, formatting, WebUI type checking/build and
 compiled workspace test binaries. Execute the Android test binaries and verify issuance,
 reload/rollback, permissions and Play Integrity on a connected device before acceptance.
+WebUI builds normalize Vue source newlines before scoped-style IDs are generated.
+CI compares LF/CRLF fixture builds and verifies the committed WebUI assets after rebuilding.
