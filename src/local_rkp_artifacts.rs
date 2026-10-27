@@ -216,12 +216,30 @@ pub fn list_json() -> Result<String> {
 
 pub fn import(id: &str) -> Result<()> {
     require_root()?;
+    let _operation = crate::rkp_renewal::operation_lock()?;
+    crate::rkp_renewal::require_no_transaction()?;
     let (file, _) = open_result(id)?;
     let xml = read_result(file)?;
     // Recheck dates/signatures/trust AND private-key matching when importing, not
     // just when issuing. Expired results can be listed, but cannot be installed.
     crate::local_rkp::validate_issued_xml(&xml)?;
     crate::keybox::install_keybox_xml(&xml).context("import issued RKP Keybox")
+}
+
+pub(crate) fn read_private(id: &str) -> Result<Zeroizing<Vec<u8>>> {
+    let (file, _) = open_result(id)?;
+    read_result(file)
+}
+
+pub(crate) fn remove_owned(id: &str, expected: &str) -> Result<()> {
+    let (file, directory) = open_result(id)?;
+    if crate::rkp_renewal::sha256(&read_result(file)?) != expected {
+        bail!("owned RKP artifact changed; refusing cleanup");
+    }
+    fs::remove_file(directory.join("keybox.xml"))?;
+    fs::remove_dir(directory)?;
+    File::open(ROOT)?.sync_all()?;
+    Ok(())
 }
 
 #[cfg(test)]

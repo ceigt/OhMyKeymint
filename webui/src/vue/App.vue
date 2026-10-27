@@ -28,6 +28,7 @@ import { fetchLatestSecurityPatch } from '../security_patch'
 import { isDev } from '../utils/dev'
 import HomeView, { type KeyboxStatus, type ModuleStatus, type TeeStatus } from './HomeView.vue'
 import PifFingerprintDialog from './PifFingerprintDialog.vue'
+import RkpRenewalDialog from './RkpRenewalDialog.vue'
 import SettingsView from './SettingsView.vue'
 import SoterDialog from './SoterDialog.vue'
 import SoterHalDialog from './SoterHalDialog.vue'
@@ -63,6 +64,7 @@ const securityPatch = ref<string | null>(null)
 const spoofedDevice = ref<string | null | undefined>(undefined)
 const securityPatchBusy = ref<'sync' | 'restore' | null>(null)
 const maintenanceBusy = ref<'gms' | 'rkp' | null>(null)
+const renewalOpen = ref(false)
 const rkpOpen = ref(false)
 const rkpError = ref('')
 const rkpIssueOpen = ref(false)
@@ -644,6 +646,7 @@ function onTool(event: ToolEvent): void {
     case 'clearGmsCache': void clearGmsCache(); break
     case 'repairRkp': rkpError.value = ''; rkpOpen.value = true; break
     case 'issueRkp': void openRkpIssue(); break
+    case 'rkpRenewal': renewalOpen.value = true; break
   }
 }
 
@@ -767,6 +770,12 @@ watch(keyboxOpen, open => {
     history.push('keybox', () => { if (!keyboxBusy.value) keyboxOpen.value = false })
   } else if (!open && overlayHistory.delete('keybox')) history.consume('keybox')
 })
+watch(renewalOpen, open => {
+  if (open && !overlayHistory.has('renewal')) {
+    overlayHistory.add('renewal')
+    history.push('renewal', () => { overlayHistory.delete('renewal'); renewalOpen.value = false })
+  } else if (!open && overlayHistory.delete('renewal')) history.consume('renewal')
+})
 function trackRkpOverlay(): void {
   if (!rkpOpen.value || overlayHistory.has('rkp')) return
   overlayHistory.add('rkp')
@@ -840,6 +849,7 @@ watch(rkpImportConfirmOpen, open => {
           @clear-gms-cache="onTool('clearGmsCache')"
           @repair-rkp="onTool('repairRkp')"
           @issue-rkp="onTool('issueRkp')"
+          @rkp-renewal="onTool('rkpRenewal')"
         />
       </Transition>
       <Transition name="page-switch">
@@ -915,6 +925,8 @@ watch(rkpImportConfirmOpen, open => {
       @notify="notify"
       @changed="refreshIdentity(true)"
     />
+    <RkpRenewalDialog v-model="renewalOpen" :cli="cli" @notify="notify" />
+
     <MiuixDialog
       :model-value="rkpOpen"
       :title="i18n.t('tools_repair_rkp')"

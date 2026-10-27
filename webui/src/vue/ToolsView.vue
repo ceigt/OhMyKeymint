@@ -21,6 +21,7 @@ export type ToolEvent =
   | 'clearGmsCache'
   | 'repairRkp'
   | 'issueRkp'
+  | 'rkpRenewal'
 
 type BusyPatch = 'sync' | 'restore' | null
 
@@ -41,6 +42,7 @@ const emit = defineEmits<{
   clearGmsCache: []
   repairRkp: []
   issueRkp: []
+  rkpRenewal: []
 }>()
 
 function runTool(event: ToolEvent): void {
@@ -55,6 +57,7 @@ function runTool(event: ToolEvent): void {
     case 'clearGmsCache': emit('clearGmsCache'); break
     case 'repairRkp': emit('repairRkp'); break
     case 'issueRkp': emit('issueRkp'); break
+    case 'rkpRenewal': emit('rkpRenewal'); break
   }
 }
 
@@ -99,6 +102,12 @@ const groups = [
         icon: Reset,
         title: tr('tools_repair_rkp', 'Fix RKP'),
         summary: tr('tools_repair_rkp_desc', 'Run the vendor provisioning tool after confirming the persistent-write risk.'),
+      },
+      {
+        event: 'rkpRenewal' as const,
+        icon: Update,
+        title: tr('rkp_renewal_title', 'RKP automatic renewal'),
+        summary: tr('rkp_renewal_summary', 'Opt-in renewal one day before expiry. Preserves PIF and patch settings.'),
       },
       {
         event: 'issueRkp' as const,

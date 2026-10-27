@@ -1,4 +1,4 @@
-//! Explicit, device-backed RKP issuance. No startup action, automatic import, or retries.
+//! Device-backed RKP issuance, shared by explicit requests and opt-in renewal.
 // Protocols adapted from Duck-ToolBox 7567a8e084d31b1a6da3541bf0e8e2692ee45e0a (MIT).
 use std::{
     fs::OpenOptions,
@@ -45,6 +45,15 @@ pub enum Protocol {
 }
 
 impl Protocol {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::V1 => "v1",
+            Self::V2 => "v2",
+            Self::V1Native => "v1-native",
+        }
+    }
+
     pub fn parse(value: &str) -> Result<Self> {
         match value {
             "auto" => Ok(Self::Auto),
@@ -64,6 +73,14 @@ struct Eek {
 
 /// Called only after the CLI's explicit confirmation. One submission at most per call.
 pub fn issue(protocol: Protocol) -> Result<String> {
+    let _operation = crate::rkp_renewal::operation_lock()?;
+    crate::rkp_renewal::require_no_transaction()?;
+    crate::rkp_renewal::begin_manual_issuance(protocol)?;
+    let id = issue_locked(protocol, None)?;
+    crate::local_rkp_artifacts::summary_json(&id)
+}
+
+pub(crate) fn issue_locked(protocol: Protocol, renewal_token: Option<&str>) -> Result<String> {
     if !cfg!(all(target_os = "android", target_arch = "aarch64")) {
         bail!("Local RKP issuance requires Android arm64");
     }
@@ -110,20 +127,23 @@ pub fn issue(protocol: Protocol) -> Result<String> {
         (int(-3), bytes(&point[33..])),
     ]);
     let eek = fetch_eek(&fingerprint)?;
-    let mut last_error = None;
+    let mut errors = Vec::new();
+    let mut successful_method = protocol;
     let mut csr = None;
     // Fallback is allowed only for LOCAL CSR construction failures. Once submitted to
     // Google, every failure is final, including a parse/validation/storage failure.
     for method in methods {
         match build_csr(method, &eek, &public) {
             Ok(value) => {
+                successful_method = method;
                 csr = Some(value);
                 break;
             }
-            Err(error) => last_error = Some(error),
+            Err(error) => errors.push(format!("{}: {error:#}", method.as_str())),
         }
     }
-    let csr = csr.ok_or_else(|| last_error.unwrap_or_else(|| anyhow!("no supported RKP path")))?;
+    let csr = csr.ok_or_else(|| anyhow!("Local CSR failed: {}", errors.join("; ")))?;
+    crate::rkp_renewal::before_submission(successful_method, renewal_token)?;
     let signed = submit(&csr, &eek.challenge)?;
     let chain = order_chain(&signed, point).context(SUBMISSION_UNKNOWN)?;
     let xml = keybox_xml(private.as_ref(), &chain);
@@ -131,7 +151,8 @@ pub fn issue(protocol: Protocol) -> Result<String> {
     let id = crate::local_rkp_artifacts::store_issued_keybox(xml.as_bytes()).context(
         "Certificates returned, but saving the local result failed; do not blindly issue again",
     )?;
-    crate::local_rkp_artifacts::summary_json(&id)
+    crate::rkp_renewal::record_success(successful_method, &id)?;
+    Ok(id)
 }
 
 fn candidate_methods(protocol: Protocol) -> Result<Vec<Protocol>> {

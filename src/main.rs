@@ -38,6 +38,7 @@ pub mod macros;
 pub mod pif_spoof;
 pub mod plat;
 pub mod proto;
+pub mod rkp_renewal;
 pub mod rkp_repair;
 pub mod rkp_v1_bridge;
 pub mod security_patch;
@@ -1059,6 +1060,13 @@ fn handle_local_rkp_command(
             }
             local_rkp_artifacts::import(&id).map(|()| "rkp_imported".into())
         }
+        "--webui-rkp-renewal" => rkp_renewal::command(args.collect()),
+        "--rkp-renewal-worker" => {
+            if args.next().is_some() {
+                return Some(Err("Renewal worker accepts no arguments".into()));
+            }
+            rkp_renewal::worker().map(|()| String::new())
+        }
         "--rkp-native-worker" => {
             let Some(directory) = args.next() else {
                 return Some(Err("RKP worker requires its exchange directory".into()));
@@ -1252,6 +1260,9 @@ fn run() -> Result<()> {
 
     keybox::initialize().context("failed to initialize keybox runtime")?;
 
+    if let Err(error) = rkp_renewal::start_worker() {
+        warn!("could not start opt-in RKP renewal: {error:#}");
+    }
     info!("setting uid/gid={} role=keystore", KEYSTORE_UID);
     set_keystore_identity()?;
 

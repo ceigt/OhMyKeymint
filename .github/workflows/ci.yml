@@ -39,6 +39,7 @@ jobs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: nightly
+        components: rustfmt, clippy
         target: aarch64-linux-android
 
     - name: Install Android SDK
@@ -116,6 +117,7 @@ jobs:
     - name: Build WebUI
       run: |
         pnpm --dir webui install --frozen-lockfile
+        node --experimental-strip-types webui/src/rkp_renewal.test.mjs
         pnpm --dir webui build
 
     - name: Verify committed WebUI build
@@ -132,6 +134,7 @@ jobs:
       uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
         toolchain: nightly
+        components: rustfmt, clippy
         target: aarch64-linux-android
 
     - name: Cache Cargo registry and build artifacts
@@ -180,18 +183,20 @@ jobs:
         pip install toml
 
     - name: Android compile and lint gates
+      if: matrix.build-type == 'release'
       env:
         BORINGSSL_BUILD_DIR: ${{ github.workspace }}/boringssl/build
       run: |
         cargo clippy --target aarch64-linux-android --workspace --all-targets -- -D warnings
         cargo fmt --all -- --check
-        cargo test --target aarch64-linux-android --workspace --no-run
+        cargo test --target aarch64-linux-android --workspace --no-run --message-format=json > android-tests.jsonl
+        python scripts/collect_android_tests.py android-tests.jsonl target/android-test-bins
     - name: Upload Android test executables
       if: matrix.build-type == 'release'
       uses: actions/upload-artifact@v7
       with:
         name: omk-android-tests
-        path: target/aarch64-linux-android/debug/deps/
+        path: target/android-test-bins/
         retention-days: 14
 
     - name: Build OhMyKeymint
@@ -210,6 +215,13 @@ jobs:
       with:
         name: ${{ steps.prepareArtifact.outputs.releaseName }}
         path: "./module-${{ matrix.build-type }}/*"
+        retention-days: 90
+
+    - name: Upload installable package
+      uses: actions/upload-artifact@v7
+      with:
+        name: omk-installable-${{ matrix.build-type }}
+        path: target/OhMyKeymint-*.zip
         retention-days: 90
 
     - name: Attest release build provenance

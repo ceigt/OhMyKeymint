@@ -965,6 +965,11 @@ fn encode_pem_block(label: &str, der: &[u8]) -> String {
 }
 
 fn write_keybox_xml(path: &str, xml: &str) -> Result<()> {
+    let _lock = crate::rkp_renewal::keybox_lock()?;
+    write_keybox_xml_unlocked(path, xml)
+}
+
+fn write_keybox_xml_unlocked(path: &str, xml: &str) -> Result<()> {
     atomic_replace_preserving_metadata(
         Path::new(path),
         xml.as_bytes(),
@@ -1389,6 +1394,61 @@ pub fn install_keybox_xml(contents: &[u8]) -> Result<()> {
     write_keybox_xml(KEYBOX_PATH, xml)
 }
 
+/// Compare-and-swap protects renewal/rollback from a concurrent manual replacement.
+pub(crate) fn replace_keybox_if_current(expected: &str, contents: &[u8]) -> Result<()> {
+    validate_keybox_xml(contents)?;
+    let _lock = crate::rkp_renewal::keybox_lock()?;
+    let current = crate::rkp_renewal::read_keybox()?;
+    if crate::rkp_renewal::sha256(&current) != expected {
+        bail!("Keybox changed; replacement was cancelled");
+    }
+    write_keybox_xml_unlocked(KEYBOX_PATH, str::from_utf8(contents)?)
+}
+
+/// Existing expired chains may trigger renewal; newly issued chains remain strict.
+pub(crate) fn rkp_expiry(contents: &[u8], allow_expired: bool) -> Result<i64> {
+    let keybox = KeyBox::from_xml_str(str::from_utf8(contents)?)?;
+    let info = keybox.ec_info.as_ref().context("RKP EC chain is missing")?;
+    let expiry = info
+        .chain
+        .iter()
+        .map(|item| {
+            parse_x509_certificate(&item.encoded_certificate)
+                .map(|(_, cert)| cert.validity().not_after.timestamp())
+                .map_err(|_| anyhow!("invalid RKP certificate"))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .min()
+        .context("empty RKP chain")?;
+    let now = x509_parser::time::ASN1Time::now().timestamp();
+    let when = if allow_expired && expiry <= now {
+        expiry - 1
+    } else {
+        now
+    };
+    validate_issued_rkp_xml_at(
+        contents,
+        &[
+            GOOGLE_HARDWARE_ROOT_SPKI_DER.as_slice(),
+            GOOGLE_EC_ROOT_SPKI_DER.as_slice(),
+        ],
+        when,
+    )?;
+    Ok(expiry)
+}
+
+pub(crate) fn require_live_rkp_status(contents: &[u8]) -> Result<()> {
+    let keybox = KeyBox::from_xml_str(str::from_utf8(contents)?)?;
+    let serials = keybox.certificate_serials()?;
+    let contents = fetch_google_attestation_status()?;
+    if classify_google_attestation_status(&contents, &serials)? != KeyboxRevocationStatus::NotListed
+    {
+        bail!("New RKP certificate is revoked or suspended");
+    }
+    Ok(())
+}
+
 /// Strict acceptance for a newly issued local RKP artifact. Ordinary Keybox import
 /// keeps its existing compatibility semantics; only the new issuer uses this gate.
 pub(crate) fn validate_issued_rkp_xml(contents: &[u8]) -> Result<()> {
@@ -1402,6 +1462,15 @@ pub(crate) fn validate_issued_rkp_xml(contents: &[u8]) -> Result<()> {
 }
 
 fn validate_issued_rkp_xml_with_roots(contents: &[u8], roots: &[&[u8]]) -> Result<()> {
+    validate_issued_rkp_xml_at(
+        contents,
+        roots,
+        x509_parser::time::ASN1Time::now().timestamp(),
+    )
+}
+
+fn validate_issued_rkp_xml_at(contents: &[u8], roots: &[&[u8]], timestamp: i64) -> Result<()> {
+    let time = x509_parser::time::ASN1Time::from_timestamp(timestamp)?;
     validate_keybox_xml(contents)
         .map_err(|_| anyhow!("issued RKP Keybox failed private-key/leaf validation"))?;
     let text = str::from_utf8(contents).context("issued RKP Keybox is not UTF-8")?;
@@ -1420,7 +1489,7 @@ fn validate_issued_rkp_xml_with_roots(contents: &[u8], roots: &[&[u8]]) -> Resul
     for item in &info.chain {
         let (rest, cert) = parse_x509_certificate(&item.encoded_certificate)
             .map_err(|_| anyhow!("invalid issued RKP X.509 certificate"))?;
-        if !rest.is_empty() || !cert.validity().is_valid() {
+        if !rest.is_empty() || !cert.validity().is_valid_at(time) {
             bail!("issued RKP certificate is expired, not yet valid or malformed");
         }
         certificates.push(cert);
@@ -1532,6 +1601,11 @@ fn install_keybox(
         retire_stale_keybox_bound_entries(new_identity);
     }
 
+    if let Err(error) =
+        crate::rkp_renewal::publish_loaded_receipt(new_identity, db_retirement_allowed)
+    {
+        warn!("could not publish Keybox load receipt: {error:#}");
+    }
     changed
 }
 

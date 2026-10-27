@@ -1,3 +1,4 @@
+import { parseRkpRenewalStatus, type RkpRenewalStatus } from './rkp_renewal'
 import { exec, spawn } from 'kernelsu-alt'
 import { normalizeScoopTargets, parseScoopTarget } from './package_name'
 import {
@@ -540,6 +541,18 @@ export class Cli {
     const { keymint } = await this.#getHelperPaths()
     const output = await this.#run(keymint, ['--webui-repair-rkp', '--confirm-persistent-write'], 256)
     if (output !== 'rkp_tool_completed') throw new Error('OMK returned an unexpected RKP tool result')
+  }
+
+  async rkpRenewal(action: 'status' | 'enable' | 'disable' | 'resume' | 'recover' | 'discard', protocol = 'last-success'): Promise<RkpRenewalStatus> {
+    const args = ['--webui-rkp-renewal', action]
+    if (action === 'enable') {
+      if (!['last-success', 'v1', 'v2', 'v1-native'].includes(protocol)) throw new Error('Invalid renewal protocol')
+      args.push('--confirm-renewal', protocol)
+    } else if (action === 'resume') args.push('--acknowledge-uncertain-result')
+    else if (action === 'recover') args.push('--confirm-rollback')
+    else if (action === 'discard') args.push('--confirm-discard-pending')
+    const { keymint } = await this.#getHelperPaths()
+    return parseRkpRenewalStatus(parseCanonicalJson(await this.#run(keymint, args, 4096), 'renewal status'))
   }
 
   async issueRkpKeybox(protocol: RkpProtocol = 'auto'): Promise<RkpIssuedArtifact> {
