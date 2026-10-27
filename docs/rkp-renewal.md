@@ -29,7 +29,8 @@ these settings; it does not sync or choose a new fingerprint or patch date.
 Before replacement the worker durably records a root-private exact backup and transaction.
 Cross-process compare-and-swap refuses to overwrite an unrelated replacement. A fresh
 receipt from the same running KeyMint process must confirm loading the candidate, with
-matching file hash and configuration. Failure restores the recorded original when it is
+matching file hash and the configuration snapshot for this operation. A legitimate
+PIF or patch update between operations becomes the next snapshot. Failure restores the recorded original when it is
 still safe to do so; unresolved recovery pauses instead of overwriting another Keybox.
 A restart recovers an unfinished transaction before allowing another submission.
 Only unchanged, expired artifacts created by automatic renewal are cleaned up; current,

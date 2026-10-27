@@ -370,7 +370,6 @@ fn receipt() -> Result<Receipt> {
         serde_json::from_slice(&read_bounded(Path::new(RECEIPT), KEYSTORE_UID, MAX_JSON)?)?;
     if r.fallback
         || r.start != process_start(r.pid)?
-        || r.config != config_hash()?
         || r.boot != fs::read_to_string("/proc/sys/kernel/random/boot_id")?.trim()
     {
         bail!("OMK load receipt is stale or uses fallback keys");
@@ -381,17 +380,26 @@ fn receipt() -> Result<Receipt> {
     }
     Ok(r)
 }
-fn await_load(hash: &str, before: &Receipt) -> Result<()> {
+fn matches_fresh_receipt(current: &Receipt, before: &Receipt, hash: &str, config: &str) -> bool {
+    current.pid == before.pid
+        && current.start == before.start
+        && current.boot == before.boot
+        && current.sha256 == hash
+        && current.config == config
+        && current.sequence > before.sequence
+        && !current.fallback
+}
+fn await_load(hash: &str, before: &Receipt, config: &str) -> Result<()> {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(45) {
-        if sha256(&read_keybox()?) != hash {
+        if sha256(&read_keybox()?) != hash || config_hash()? != config {
             bail!("Keybox changed while confirming load");
         }
         if let Ok(r) = receipt() {
-            if r.pid != before.pid || r.start != before.start || r.config != before.config {
+            if r.pid != before.pid || r.start != before.start {
                 bail!("OMK restarted or configuration changed during replacement");
             }
-            if r.sha256 == hash && r.sequence > before.sequence {
+            if matches_fresh_receipt(&r, before, hash, config) {
                 return Ok(());
             }
         }
@@ -413,8 +421,9 @@ fn recover(state: &mut State) -> Result<()> {
     }
     if current == t.target_hash {
         let before = receipt()?;
+        let config = config_hash()?;
         keybox::replace_keybox_if_current(&current, &backup)?;
-        await_load(&t.source_hash, &before)?;
+        await_load(&t.source_hash, &before, &config)?;
     } else if receipt()?.sha256 != t.source_hash {
         bail!("Restored Keybox load is not confirmed");
     }
@@ -445,7 +454,7 @@ fn apply(c: &Consent, state: &mut State) -> Result<()> {
         bail!("Active Keybox has not been loaded by OMK");
     }
     keybox::require_live_rkp_status(&candidate)?;
-    if config_hash()? != before.config {
+    if config_hash()? != pending.config {
         bail!("Configuration changed before replacement");
     }
     same_consent(c)?;
@@ -457,7 +466,7 @@ fn apply(c: &Consent, state: &mut State) -> Result<()> {
     save("state.json", state)?;
     same_consent(c)?;
     keybox::replace_keybox_if_current(&pending.source_hash, &candidate)?;
-    if let Err(error) = await_load(&pending.target_hash, &before) {
+    if let Err(error) = await_load(&pending.target_hash, &before, &pending.config) {
         recover(state).context("Automatic rollback needs attention")?;
         return Err(error);
     }
@@ -624,12 +633,15 @@ pub fn worker() -> Result<()> {
         if !module_active() {
             return Ok(());
         }
-        if let Ok(_lock) = operation_lock() {
-            if let Err(_error) = tick() {
-                let mut state: State = load("state.json")?;
-                // Safe local errors only: never store network response bodies or CSR data.
-                state.blocked = Some("Renewal paused; review local state before resuming".into());
-                save("state.json", &state)?;
+        if rsproperties::get::<String>("sys.boot_completed").is_ok_and(|value| value == "1") {
+            if let Ok(_lock) = operation_lock() {
+                if tick().is_err() {
+                    let mut state: State = load("state.json")?;
+                    // Safe local errors only: never store network response bodies or CSR data.
+                    state.blocked =
+                        Some("Renewal paused; review local state before resuming".into());
+                    save("state.json", &state)?;
+                }
             }
         }
         if consent()?.is_none() && load::<State>("state.json")?.transaction.is_none() {
@@ -806,6 +818,93 @@ mod tests {
         s.blocked = None;
         s.next_check = t + 1;
         assert!(!due(t, &s, t as i64).unwrap());
+    }
+    #[test]
+    fn loaded_receipt_requires_this_process_candidate_and_configuration() {
+        let before = Receipt {
+            pid: 42,
+            start: "100".into(),
+            boot: "boot".into(),
+            sequence: 1,
+            sha256: "old".into(),
+            identity: "old-id".into(),
+            config: "old-config".into(),
+            fallback: false,
+        };
+        let mut candidate = Receipt {
+            sequence: 2,
+            sha256: "new".into(),
+            identity: "new-id".into(),
+            config: "new-config".into(),
+            ..before.clone()
+        };
+        assert!(matches_fresh_receipt(
+            &candidate,
+            &before,
+            "new",
+            "new-config"
+        ));
+        assert!(!matches_fresh_receipt(
+            &before,
+            &before,
+            "old",
+            "old-config"
+        ));
+        assert!(!matches_fresh_receipt(
+            &candidate,
+            &before,
+            "old",
+            "new-config"
+        ));
+        assert!(!matches_fresh_receipt(
+            &candidate,
+            &before,
+            "new",
+            "old-config"
+        ));
+        candidate.pid += 1;
+        assert!(!matches_fresh_receipt(
+            &candidate,
+            &before,
+            "new",
+            "new-config"
+        ));
+        candidate.pid = before.pid;
+        candidate.start = "101".into();
+        assert!(!matches_fresh_receipt(
+            &candidate,
+            &before,
+            "new",
+            "new-config"
+        ));
+        candidate.start = before.start.clone();
+        candidate.fallback = true;
+        assert!(!matches_fresh_receipt(
+            &candidate,
+            &before,
+            "new",
+            "new-config"
+        ));
+    }
+    #[test]
+    fn private_reads_reject_links_permissions_and_oversize() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("private");
+        fs::write(&file, b"data").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        let uid = fs::metadata(&file).unwrap().uid();
+        assert_eq!(&**read_bounded(&file, uid, 4).unwrap(), b"data");
+        assert!(read_bounded(&file, uid, 3).is_err());
+        assert!(read_bounded(&file, uid.wrapping_add(1), 4).is_err());
+        let link = temp.path().join("link");
+        symlink(&file, &link).unwrap();
+        assert!(read_bounded(&link, uid, 4).is_err());
+        fs::hard_link(&file, temp.path().join("hard")).unwrap();
+        assert!(read_bounded(&file, uid, 4).is_err());
+        fs::remove_file(temp.path().join("hard")).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_bounded(&file, uid, 4).is_err());
     }
     #[test]
     fn state_rejects_unknown_fields_and_corruption() {
