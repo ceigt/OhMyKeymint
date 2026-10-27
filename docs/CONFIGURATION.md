@@ -1717,6 +1717,10 @@ after submission must not be treated as permission to retry blindly.
 Each network operation is bounded to 30 seconds and 256 KiB of response;
 each local bridge/worker is bounded to 30 seconds.
 
+Damaged or incomplete staged results remain visible as separate entries with
+import disabled. Deletion is available only after active and recovery protection
+checks pass; unknown files or unsafe links require manual inspection.
+
 Issued chains must match the generated key and pass certificate validity,
 issuer signature, CA/path-length/key-usage and pinned Google root checks.
 Successful issuance stores `data/rkp-artifacts/<id>/keybox.xml` under the OMK
@@ -1725,7 +1729,8 @@ file. The XML contains the software private key; no duplicate private-key
 file is written. At most 16 results are retained; issuance refuses when full,
 and does not delete older results automatically. Temporary bridge files are
 removed after the request. Opening the list creates no state and returns only
-an opaque ID, Unix creation timestamp and certificate subjects, never XML,
+an opaque ID, Unix creation timestamp, certificate subjects and validity/deletion
+flags, never XML,
 private keys, CSR contents or device identifiers.
 
 Issuance does not change the active Keybox. **Import** requires another

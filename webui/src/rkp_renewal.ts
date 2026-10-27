@@ -28,8 +28,8 @@ export function parseRkpRenewalStatus(value: unknown): RkpRenewalStatus {
   if (v.last_error !== null) {
     const e = v.last_error as Record<string, unknown>
     if (!e || typeof e !== 'object' || Array.isArray(e) || Object.keys(e).sort().join(',') !== 'at,code,retry_at,stage'
-      || !['revocation_network', 'submission_uncertain', 'pre_submission', 'storage_unavailable', 'interface_unavailable', 'challenge_network', 'csr_failed', 'local_state'].includes(e.code as string)
-      || !['validation', 'submission', 'preparation', 'recovery'].includes(e.stage as string)
+      || !['revocation_network', 'submission_uncertain', 'pre_submission', 'storage_unavailable', 'interface_unavailable', 'challenge_network', 'csr_failed', 'local_state', 'configuration_changed', 'candidate_invalid', 'active_changed', 'load_unconfirmed', 'rollback_unconfirmed'].includes(e.code as string)
+      || !['validation', 'submission', 'preparation', 'recovery', 'replacement', 'confirmation'].includes(e.stage as string)
       || !Number.isSafeInteger(e.at) || (e.at as number) < 0
       || (e.retry_at !== null && (!Number.isSafeInteger(e.retry_at) || (e.retry_at as number) < 0))) throw new Error('Invalid renewal failure')
   }

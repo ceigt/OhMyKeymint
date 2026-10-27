@@ -598,6 +598,7 @@ async function issueRkpKeybox(): Promise<void> {
 }
 
 function requestRkpImport(artifact: RkpIssuedArtifact, action: 'import' | 'delete' = 'import'): void {
+  if (action === 'import' ? !artifact.valid : !artifact.can_delete) return
   rkpResultAction.value = action
   if (rkpIssuanceBusy.value) return
   rkpIssueError.value = ''
@@ -977,11 +978,12 @@ watch(rkpImportConfirmOpen, open => {
         <div v-if="rkpIssuedArtifacts.length" class="rkp-issued-list">
           <article v-for="artifact in rkpIssuedArtifacts" :key="artifact.id" class="rkp-issued-item">
             <div class="rkp-issued-item__metadata">
-              <strong>{{ formatRkpCreatedAt(artifact.created_at) }}</strong>
+              <strong>{{ artifact.valid ? formatRkpCreatedAt(artifact.created_at) : i18n.t('rkp_result_damaged') }}</strong>
+              <span v-if="!artifact.valid">{{ artifact.id }}</span>
               <span v-for="(subject, index) in artifact.chain_subjects" :key="`${artifact.id}-${index}`">{{ subject }}</span>
             </div>
             <div class="rkp-issued-item__actions">
-              <MiuixButton :disabled="rkpIssuanceBusy" @click="requestRkpImport(artifact)">
+              <MiuixButton :disabled="rkpIssuanceBusy || !artifact.valid" @click="requestRkpImport(artifact)">
                 {{ i18n.t('rkp_import_button') }}
               </MiuixButton>
               <MiuixButton :disabled="rkpIssuanceBusy || !artifact.can_delete" @click="requestRkpImport(artifact, 'delete')">{{ i18n.t('rkp_delete_button') }}</MiuixButton>

@@ -340,4 +340,10 @@
     <string name="rkp_error_csr_failed">本地 CSR 构建失败，请检查协议及固件兼容性。</string>
     <string name="rkp_error_local_state">本地校验或恢复失败，请检查状态后再恢复。</string>
     <string name="soter_relay_https_required">请配置可信的 HTTPS 中继及独立凭据；远程功能必须验证 TLS 证书。</string>
+    <string name="rkp_result_damaged">结果损坏或未写入完成</string>
+    <string name="rkp_error_configuration_changed">配置发生变化，已停止换证。</string>
+    <string name="rkp_error_candidate_invalid">候选证书无效、内容变化或剩余有效期不足。</string>
+    <string name="rkp_error_active_changed">现用 Keybox 发生变化，已停止换证。</string>
+    <string name="rkp_error_load_unconfirmed">OMK 未确认加载对应证书。</string>
+    <string name="rkp_error_rollback_unconfirmed">尚未确认回滚成功，恢复备份仍保留。</string>
 </resources>

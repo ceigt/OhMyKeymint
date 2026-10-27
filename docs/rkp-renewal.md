@@ -16,10 +16,14 @@ attestation identity. Restoring a Keybox does not restore retired app keys.
 The native root worker checks dates locally every six hours. The module daemon checks
 the worker singleton once per minute and restarts a missing worker when consent or
 recovery requires it. The WebUI reports both consent and live worker status. Only the final day triggers
-issuance, with a persisted limit of two attempts in a rolling 24 hours. Clock rollback,
+issuance, with a persisted limit of two signing submissions in a rolling 24 hours. Clock rollback,
 ambiguous submissions and unresolved replacement operations pause the worker.
-A failed or interrupted pre-submission attempt retains its budget and retries only
-after the persisted cooldown. Safe error codes, stages, timestamps and retry deadlines
+Preparation failures do not consume signing slots. They retry after five minutes,
+15 minutes, one hour, three hours, then at most once every six hours. The delay is
+persisted before preparation so a restart cannot bypass it. Signing slots are
+persisted immediately before the submitted journal and POST; a crash between these
+writes conservatively spends a slot. Unknown submission outcomes are never retried
+automatically. Existing persisted attempts remain charged. Safe error codes, stages, timestamps and retry deadlines
 are shown without CSR or response bodies. A failed public revocation-list download
 keeps the pending candidate and retries after 15 minutes, one hour and three hours;
 further failures pause for manual review. These read-only retries never spend the
@@ -40,11 +44,19 @@ receipt from the same running KeyMint process must confirm loading the candidate
 matching file hash and the configuration snapshot for this operation. A legitimate
 PIF or patch update between operations becomes the next snapshot. Failure restores the recorded original when it is
 still safe to do so; unresolved recovery pauses instead of overwriting another Keybox.
+The failure code, stage and timestamp are saved before rollback and retained after
+a confirmed rollback. Configuration changes, invalid candidates, active-file changes,
+load-confirmation failures and unconfirmed rollback have distinct redacted codes.
 A restart recovers an unfinished transaction before allowing another submission.
 Only unchanged, expired artifacts created by automatic renewal are cleaned up; current,
 pending and manually issued artifacts are retained automatically. The staged-results
 dialog offers explicit deletion, protects active and unfinished-operation results,
-and warns near the 16-result capacity. Deletion never changes the installed Keybox. All renewal secrets/state are under
+and warns near the 16-result capacity. Results are atomically published only after
+the private file is synchronized. Damaged or incomplete results appear individually
+without hiding other results and cannot be imported. Explicit deletion rechecks
+active-file, loaded-file and unfinished-operation protection, permits only bounded
+private regular result/temporary files, and never follows links or recursively
+deletes unknown contents. Deletion never changes the installed Keybox. All renewal secrets/state are under
 `/data/misc/keystore/omk/data/rkp-renewal/`, root-only, with bounded reads.
 
 The shared data lock covers only the initial configuration snapshot, not network

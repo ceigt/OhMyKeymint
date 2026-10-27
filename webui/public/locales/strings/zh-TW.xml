@@ -218,4 +218,10 @@
     <string name="rkp_repair_confirm">確定</string>
     <string name="rkp_tool_completed">原廠工具回報執行完成；RKP憑證下發與金鑰認證效果仍需另外驗證。</string>
     <string name="soter_beta_applied">設定已儲存，SoterServer 將依所選模式重新連線，無需重新啟動手機。</string>
+    <string name="rkp_result_damaged">結果損壞或尚未寫入完成</string>
+    <string name="rkp_error_configuration_changed">設定發生變化，已停止換證。</string>
+    <string name="rkp_error_candidate_invalid">候選憑證無效、內容變更或剩餘效期不足。</string>
+    <string name="rkp_error_active_changed">使用中的 Keybox 發生變化，已停止換證。</string>
+    <string name="rkp_error_load_unconfirmed">OMK 尚未確認載入對應憑證。</string>
+    <string name="rkp_error_rollback_unconfirmed">尚未確認回復成功，復原備份仍保留。</string>
 </resources>

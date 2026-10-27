@@ -10,3 +10,7 @@ const failure = {code:'revocation_network', stage:'validation', at:10, retry_at:
 assert.deepEqual(parseRkpRenewalStatus({...status,last_error:failure}).last_error, failure)
 for (const change of [{code:'private key'}, {stage:'secret'}, {at:-1}, {retry_at:-1}, {extra:1}]) assert.throws(() => parseRkpRenewalStatus({...status,last_error:{...failure,...change}}))
 console.log('Renewal status parser checks passed')
+for (const [code, stage] of [['configuration_changed', 'validation'], ['candidate_invalid', 'validation'], ['active_changed', 'replacement'], ['load_unconfirmed', 'confirmation'], ['rollback_unconfirmed', 'recovery']]) {
+  const failure = { code, stage, at: 100, retry_at: null }
+  assert.deepEqual(parseRkpRenewalStatus({ ...status, blocked: 'Paused', last_error: failure }).last_error, failure)
+}

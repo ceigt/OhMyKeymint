@@ -113,6 +113,7 @@ export interface KeyboxInspector {
 
 export interface RkpIssuedArtifact {
   can_delete: boolean
+  valid: boolean
   id: string
   created_at: number
   chain_subjects: string[]
@@ -210,15 +211,17 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[])
 
 function parseRkpIssuedArtifact(value: unknown): RkpIssuedArtifact {
   if (!isRecord(value)
-      || !hasOnlyKeys(value, ['id', 'created_at', 'chain_subjects', 'can_delete'])
+      || !hasOnlyKeys(value, ['id', 'created_at', 'chain_subjects', 'can_delete', 'valid'])
       || typeof value.can_delete !== 'boolean'
+      || typeof value.valid !== 'boolean'
       || typeof value.id !== 'string'
       || !/^[a-f0-9]{32}$/.test(value.id)
       || typeof value.created_at !== 'number'
       || !Number.isSafeInteger(value.created_at)
       || value.created_at < 0 || value.created_at > 253402300799
       || !Array.isArray(value.chain_subjects)
-      || value.chain_subjects.length < 1 || value.chain_subjects.length > 8
+      || (value.valid ? value.chain_subjects.length < 1 : value.chain_subjects.length !== 0)
+      || value.chain_subjects.length > 8
       || !value.chain_subjects.every(subject => typeof subject === 'string'
         && subject.length > 0 && subject.length <= 512
         && !/[\u0000-\u001f\u007f]/.test(subject))) {
@@ -229,6 +232,7 @@ function parseRkpIssuedArtifact(value: unknown): RkpIssuedArtifact {
     created_at: value.created_at,
     chain_subjects: value.chain_subjects as string[],
     can_delete: value.can_delete as boolean,
+    valid: value.valid as boolean,
   }
 }
 

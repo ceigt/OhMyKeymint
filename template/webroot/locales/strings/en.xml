@@ -340,4 +340,10 @@
     <string name="rkp_error_csr_failed">Local CSR construction failed. Check protocol and firmware compatibility.</string>
     <string name="rkp_error_local_state">Local validation or recovery failed. Review state before resuming.</string>
     <string name="soter_relay_https_required">Configure your trusted HTTPS relay and independent credentials. TLS certificate verification is required.</string>
+    <string name="rkp_result_damaged">Damaged or incomplete result</string>
+    <string name="rkp_error_configuration_changed">Configuration changed; replacement was stopped.</string>
+    <string name="rkp_error_candidate_invalid">The candidate certificate is invalid, changed or too short-lived.</string>
+    <string name="rkp_error_active_changed">The active Keybox changed; replacement was stopped.</string>
+    <string name="rkp_error_load_unconfirmed">OMK did not confirm loading the certificate.</string>
+    <string name="rkp_error_rollback_unconfirmed">Rollback has not been confirmed; the recovery backup is retained.</string>
 </resources>

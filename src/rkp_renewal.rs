@@ -34,6 +34,7 @@ const INTERVAL: u64 = 6 * 3600;
 const MIN_CLOCK: u64 = 1735689600;
 const MAX_JSON: usize = 32768;
 const READ_RETRY_DELAYS: [u64; 3] = [900, 3600, 10800];
+const PREPARATION_RETRY_DELAYS: [u64; 5] = [300, 900, 3600, 10800, INTERVAL];
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -55,6 +56,7 @@ struct State {
     transaction: Option<Transaction>,
     owned: Vec<Owned>,
     read_retries: usize,
+    preparation_retries: usize,
     last_error: Option<Failure>,
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -64,6 +66,31 @@ struct Failure {
     stage: String,
     at: u64,
     retry_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, thiserror::Error)]
+enum RenewalFailure {
+    #[error("Renewal configuration changed")]
+    ConfigurationChanged,
+    #[error("The staged certificate is invalid or changed")]
+    CandidateInvalid,
+    #[error("The active Keybox changed")]
+    ActiveChanged,
+    #[error("OMK did not confirm loading the Keybox")]
+    LoadUnconfirmed,
+    #[error("Automatic rollback is not confirmed")]
+    RollbackUnconfirmed,
+}
+impl RenewalFailure {
+    fn details(self) -> (&'static str, &'static str) {
+        match self {
+            Self::ConfigurationChanged => ("configuration_changed", "validation"),
+            Self::CandidateInvalid => ("candidate_invalid", "validation"),
+            Self::ActiveChanged => ("active_changed", "replacement"),
+            Self::LoadUnconfirmed => ("load_unconfirmed", "confirmation"),
+            Self::RollbackUnconfirmed => ("rollback_unconfirmed", "recovery"),
+        }
+    }
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -299,11 +326,33 @@ pub(crate) fn before_submission(protocol: Protocol, token: Option<&str>) -> Resu
             bail!("Keybox, PIF or patch configuration changed before submission");
         }
     }
+    journal_submission(protocol, token.is_some())
+}
+fn journal_submission(protocol: Protocol, automatic: bool) -> Result<()> {
+    if automatic {
+        reserve_submission(now()?)?;
+    }
     let mut trace: Issuance = load("issuance.json")?;
     trace.stage = "submitted".into();
     trace.protocol = protocol.as_str().into();
     trace.at = now()?;
     save("issuance.json", &trace)
+}
+
+// Persist the budget before the submitted journal and before any signing POST.
+// A crash between these writes may spend one slot, but can never permit an
+// uncounted or blindly repeated signing request.
+fn reserve_submission(time: u64) -> Result<()> {
+    let mut state: State = load("state.json")?;
+    due(time, &state, i64::MAX)?;
+    state.attempts.retain(|t| time.saturating_sub(*t) < DAY);
+    if state.attempts.len() >= 2 {
+        bail!("Automatic signing budget exhausted");
+    }
+    state.attempts.push(time);
+    state.preparation_retries = 0;
+    state.next_check = time.saturating_add(INTERVAL);
+    save("state.json", &state)
 }
 pub(crate) fn record_success(protocol: Protocol, id: &str) -> Result<()> {
     let mut trace: Issuance = load("issuance.json")?;
@@ -462,6 +511,14 @@ fn await_load(hash: &str, before: &Receipt, config: &str) -> Result<()> {
     bail!("OMK did not confirm loading this Keybox within 45 seconds")
 }
 fn recover(state: &mut State) -> Result<()> {
+    if let Err(error) = recover_transaction(state) {
+        let error = error.context(RenewalFailure::RollbackUnconfirmed);
+        pause_after_failure(state, &error)?;
+        return Err(error);
+    }
+    Ok(())
+}
+fn recover_transaction(state: &mut State) -> Result<()> {
     let Some(t) = &state.transaction else {
         return Ok(());
     };
@@ -507,37 +564,40 @@ fn recover_with(
 fn apply(c: &Consent, state: &mut State) -> Result<()> {
     let pending = state.pending.clone().context("No pending certificate")?;
     if pending.config != config_hash()? {
-        bail!("PIF, patch or device configuration changed during renewal");
+        return Err(RenewalFailure::ConfigurationChanged.into());
     }
-    let candidate = artifacts::read_private(&pending.id)?;
+    let candidate =
+        artifacts::read_private(&pending.id).context(RenewalFailure::CandidateInvalid)?;
     if sha256(&candidate) != pending.target_hash {
-        bail!("Pending artifact changed");
+        return Err(RenewalFailure::CandidateInvalid.into());
     }
-    let expiry = keybox::rkp_expiry(&candidate, false)?;
+    let expiry = keybox::rkp_expiry(&candidate, false).context(RenewalFailure::CandidateInvalid)?;
     let source = read_keybox()?;
-    if sha256(&source) != pending.source_hash
-        || expiry <= keybox::rkp_expiry(&source, true)?
-        || expiry <= now()? as i64 + DAY as i64
-    {
-        bail!("Candidate is stale, shorter-lived, or active Keybox changed");
+    if sha256(&source) != pending.source_hash {
+        return Err(RenewalFailure::ActiveChanged.into());
     }
-    let before = receipt()?;
+    if expiry <= keybox::rkp_expiry(&source, true)? || expiry <= now()? as i64 + DAY as i64 {
+        return Err(RenewalFailure::CandidateInvalid.into());
+    }
+    let before = receipt().context(RenewalFailure::LoadUnconfirmed)?;
     if before.sha256 != pending.source_hash {
-        bail!("Active Keybox has not been loaded by OMK");
+        return Err(RenewalFailure::LoadUnconfirmed.into());
     }
-    keybox::require_live_rkp_status(&candidate)?;
+    keybox::require_live_rkp_status(&candidate).context(RenewalFailure::CandidateInvalid)?;
     if config_hash()? != pending.config {
-        bail!("Configuration changed before replacement");
+        return Err(RenewalFailure::ConfigurationChanged.into());
     }
-    same_consent(c)?;
+    same_consent(c).context(RenewalFailure::ConfigurationChanged)?;
     replace_with_confirmation(
         state,
         &source,
         &pending,
         || {
-            same_consent(c)?;
-            keybox::replace_keybox_if_current(&pending.source_hash, &candidate)?;
+            same_consent(c).context(RenewalFailure::ConfigurationChanged)?;
+            keybox::replace_keybox_if_current(&pending.source_hash, &candidate)
+                .context(RenewalFailure::ActiveChanged)?;
             await_load(&pending.target_hash, &before, &pending.config)
+                .context(RenewalFailure::LoadUnconfirmed)
         },
         recover,
     )?;
@@ -557,7 +617,14 @@ fn replace_with_confirmation(
     });
     save("state.json", state)?;
     if let Err(error) = replace() {
-        rollback(state).context("Automatic rollback needs attention")?;
+        // A diagnostic write failure must not prevent restoring the old key.
+        // record_failure updates memory first; successful recovery persists it.
+        let _ = record_local_failure(state, &error);
+        if let Err(rollback_error) = rollback(state) {
+            let rollback_error = rollback_error.context(RenewalFailure::RollbackUnconfirmed);
+            record_local_failure(state, &rollback_error)?;
+            return Err(rollback_error);
+        }
         return Err(error);
     }
     state.transaction = None;
@@ -566,6 +633,7 @@ fn replace_with_confirmation(
     state.last_success = now()?;
     state.blocked = None;
     state.read_retries = 0;
+    state.preparation_retries = 0;
     state.last_error = None;
     save("state.json", state)?;
     remove("rollback.xml")
@@ -645,13 +713,45 @@ fn record_failure(state: &mut State, code: &str, stage: &str, retry_at: Option<u
     });
     save("state.json", state)
 }
+fn record_local_failure(state: &mut State, error: &anyhow::Error) -> Result<()> {
+    let (code, stage) = error
+        .downcast_ref::<RenewalFailure>()
+        .map_or(("local_state", "recovery"), |error| error.details());
+    record_failure(state, code, stage, None)
+}
+
+fn pause_after_failure(state: &mut State, error: &anyhow::Error) -> Result<()> {
+    if state.blocked.is_none() {
+        state.blocked = Some("Renewal paused; review local state before resuming".into());
+    }
+    // A transaction records its cause before rollback. Keep that timestamp and
+    // cause after successful rollback, even though recovery already set blocked.
+    if !state.last_error.as_ref().is_some_and(|failure| {
+        error
+            .downcast_ref::<RenewalFailure>()
+            .is_some_and(|kind| failure.code == kind.details().0)
+    }) {
+        return record_local_failure(state, error);
+    }
+    save("state.json", state)
+}
+
+fn schedule_preparation_retry(state: &mut State, code: &str, time: u64) -> Result<()> {
+    state.issuing_source = None;
+    let index = state
+        .preparation_retries
+        .min(PREPARATION_RETRY_DELAYS.len() - 1);
+    state.next_check = time.saturating_add(PREPARATION_RETRY_DELAYS[index]);
+    state.preparation_retries = (index + 1).min(PREPARATION_RETRY_DELAYS.len() - 1);
+    record_failure(state, code, "preparation", Some(state.next_check))
+}
 fn apply_pending(c: &Consent, state: &mut State) -> Result<()> {
     match apply(c, state) {
         Ok(()) => Ok(()),
         Err(error) if state.transaction.is_none() && error.is::<keybox::RkpStatusUnavailable>() => {
             schedule_validation_retry(state)
         }
-        Err(error) => Err(error),
+        Err(error) => pause_after_failure(state, &error),
     }
 }
 fn schedule_validation_retry(state: &mut State) -> Result<()> {
@@ -708,34 +808,40 @@ fn tick() -> Result<()> {
         bail!("OMK has not loaded the current Keybox");
     }
     require_no_transaction()?;
-    state.attempts.retain(|t| time.saturating_sub(*t) < DAY);
-    state.attempts.push(time);
-    save("state.json", &state)?;
     begin_manual_issuance(Protocol::parse(&c.protocol)?)?;
     state.issuing_source = Some(sha256(&source));
     state.issuing_config = config_hash()?;
+    // A crash during preparation also gets a bounded retry without spending a
+    // signing slot. before_submission persists the actual signing cooldown.
+    state.next_check = time.saturating_add(
+        PREPARATION_RETRY_DELAYS[state
+            .preparation_retries
+            .min(PREPARATION_RETRY_DELAYS.len() - 1)],
+    );
     save("state.json", &state)?;
     let id = match local_rkp::issue_locked(Protocol::parse(&c.protocol)?, Some(&c.token)) {
         Ok(id) => id,
         Err(e) => {
+            // before_submission may have persisted a signing attempt. Never
+            // overwrite that journal with the pre-network in-memory snapshot.
+            state = load("state.json")?;
             if load::<Issuance>("issuance.json")?.stage == "submitted" {
                 state.blocked =
                     Some("Submission outcome is uncertain; inspect before resuming".into());
                 save("state.json", &state)?;
                 record_failure(&mut state, "submission_uncertain", "submission", None)?;
-                return Err(e);
+                return Ok(());
             }
             // The journal is fsynced before POST; preparing means no certificate
             // request was submitted. Retry only after the persisted cooldown.
-            state.issuing_source = None;
             let code = e
                 .downcast_ref::<local_rkp::IssueFailure>()
                 .map_or("pre_submission", |error| error.code());
-            let retry_at = state.next_check;
-            record_failure(&mut state, code, "preparation", Some(retry_at))?;
+            schedule_preparation_retry(&mut state, code, now()?)?;
             return Ok(());
         }
     };
+    state = load("state.json")?;
     let bytes = artifacts::read_private(&id)?;
     let target_hash = sha256(&bytes);
     state.issuing_source = None;
@@ -814,14 +920,10 @@ pub fn worker() -> Result<()> {
         }
         if rsproperties::get::<String>("sys.boot_completed").is_ok_and(|value| value == "1") {
             if let Ok(_lock) = operation_lock() {
-                if tick().is_err() {
+                if let Err(error) = tick() {
                     let mut state: State = load("state.json")?;
                     // Safe local errors only: never store network response bodies or CSR data.
-                    if state.blocked.is_none() {
-                        state.blocked =
-                            Some("Renewal paused; review local state before resuming".into());
-                        record_failure(&mut state, "local_state", "recovery", None)?;
-                    }
+                    pause_after_failure(&mut state, &error)?;
                 }
             }
         }
@@ -1018,6 +1120,98 @@ mod tests {
         }
     }
     #[test]
+    fn preparation_failures_retry_without_spending_the_signing_budget() {
+        fixture(|| {
+            let time = now().unwrap();
+            let mut state = State::default();
+            for delay in PREPARATION_RETRY_DELAYS
+                .into_iter()
+                .chain([INTERVAL, INTERVAL])
+            {
+                state.issuing_source = Some("source".into());
+                schedule_preparation_retry(&mut state, "challenge_network", time).unwrap();
+                state = load("state.json").unwrap();
+                assert!(state.attempts.is_empty() && state.issuing_source.is_none());
+                assert_eq!(state.next_check, time + delay);
+                assert!(due(state.next_check, &state, (time + 18 * 3600) as i64).unwrap());
+            }
+            journal_submission(Protocol::V1, true).unwrap();
+            let state: State = load("state.json").unwrap();
+            assert_eq!(state.attempts.len(), 1);
+            assert_eq!(state.preparation_retries, 0);
+            assert_eq!(
+                load::<Issuance>("issuance.json").unwrap().stage,
+                "submitted"
+            );
+            // A restarted worker must retain both the charged budget and the
+            // uncertain-submission fence; it cannot issue another request.
+            assert!(require_no_transaction().is_err());
+            assert!(completed_artifact_id(&load("issuance.json").unwrap()).is_err());
+        });
+    }
+    #[test]
+    fn signing_budget_is_durable_before_submission_and_survives_journal_failure() {
+        fixture(|| {
+            journal_submission(Protocol::V1, true).unwrap();
+            journal_submission(Protocol::V1, true).unwrap();
+            assert!(journal_submission(Protocol::V1, true).is_err());
+            assert_eq!(load::<State>("state.json").unwrap().attempts.len(), 2);
+            let time = now().unwrap() + DAY;
+            reserve_submission(time).unwrap();
+            assert_eq!(load::<State>("state.json").unwrap().attempts, vec![time]);
+        });
+        fixture(|| {
+            fs::create_dir(path("issuance.json")).unwrap();
+            assert!(journal_submission(Protocol::V1, true).is_err());
+            assert_eq!(load::<State>("state.json").unwrap().attempts.len(), 1);
+        });
+    }
+    #[test]
+    fn rollback_failure_and_already_blocked_errors_keep_sanitized_diagnostics() {
+        fixture(|| {
+            let p = pending_fixture();
+            let mut state = State {
+                pending: Some(p.clone()),
+                ..Default::default()
+            };
+            let error = replace_with_confirmation(
+                &mut state,
+                b"old",
+                &p,
+                || Err(anyhow!("private response body").context(RenewalFailure::LoadUnconfirmed)),
+                |_| {
+                    let saved: State = load("state.json")?;
+                    assert_eq!(saved.last_error.unwrap().code, "load_unconfirmed");
+                    bail!("private rollback detail")
+                },
+            )
+            .unwrap_err();
+            pause_after_failure(&mut state, &error).unwrap();
+            let saved: State = load("state.json").unwrap();
+            assert!(
+                saved.transaction.is_some() && saved.pending.is_some() && saved.blocked.is_some()
+            );
+            let failure = saved.last_error.unwrap();
+            assert_eq!(
+                (failure.code.as_str(), failure.stage.as_str()),
+                ("rollback_unconfirmed", "recovery")
+            );
+            assert!(failure.at > 0 && failure.retry_at.is_none());
+            assert!(!fs::read_to_string(path("state.json"))
+                .unwrap()
+                .contains("private"));
+            pause_after_failure(&mut state, &RenewalFailure::ConfigurationChanged.into()).unwrap();
+            assert_eq!(
+                load::<State>("state.json")
+                    .unwrap()
+                    .last_error
+                    .unwrap()
+                    .code,
+                "configuration_changed"
+            );
+        });
+    }
+    #[test]
     fn replacement_journal_is_durable_before_swap_and_success_is_committed() {
         fixture(|| {
             let p = pending_fixture();
@@ -1058,8 +1252,12 @@ mod tests {
                 &mut state,
                 b"old",
                 &p,
-                || bail!("no load receipt"),
+                || Err(RenewalFailure::LoadUnconfirmed.into()),
                 |state| {
+                    assert_eq!(
+                        load::<State>("state.json")?.last_error.unwrap().code,
+                        "load_unconfirmed"
+                    );
                     recover_with(state, b"old", &p.target_hash, |restore| {
                         assert!(restore);
                         restored.set(true);
@@ -1069,6 +1267,12 @@ mod tests {
             )
             .is_err());
             let saved: State = load("state.json").unwrap();
+            let failure = saved.last_error.as_ref().unwrap();
+            assert_eq!(
+                (failure.code.as_str(), failure.stage.as_str()),
+                ("load_unconfirmed", "confirmation")
+            );
+            assert!(failure.at > 0);
             assert!(
                 restored.get()
                     && saved.transaction.is_none()
