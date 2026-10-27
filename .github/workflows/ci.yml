@@ -4,7 +4,7 @@ on:
   push:
     tags:
       - 'v*'
-    branches: [ "master" ]
+    branches: [ "master", "rkp-renewal-ace3" ]
     paths-ignore:
       - '**.md'
       - '**.txt'
@@ -22,14 +22,17 @@ jobs:
     steps:
     - name: Clone BoringSSL
       run: |
-        git clone https://boringssl.googlesource.com/boringssl
+        git init boringssl
+        git -C boringssl remote add origin https://boringssl.googlesource.com/boringssl
+        git -C boringssl fetch --depth=1 origin e651545da6e26e1f4420723a3b69a78ed1b9c51d
+        git -C boringssl checkout --detach FETCH_HEAD
 
     - name: Cache BoringSSL build
       uses: actions/cache@v6
       id: boringssl-cache
       with:
         path: boringssl/build
-        key: boringssl-${{ hashFiles('boringssl/.git/HEAD', 'boringssl/.git/refs/heads/main') }}
+        key: boringssl-e651545da6e26e1f4420723a3b69a78ed1b9c51d-ndk29
 
     - name: Install Rust toolchain
       if: steps.boringssl-cache.outputs.cache-hit != 'true'
@@ -175,6 +178,21 @@ jobs:
       run: |
         python -m pip install --upgrade pip
         pip install toml
+
+    - name: Android compile and lint gates
+      env:
+        BORINGSSL_BUILD_DIR: ${{ github.workspace }}/boringssl/build
+      run: |
+        cargo clippy --target aarch64-linux-android --workspace --all-targets -- -D warnings
+        cargo fmt --all -- --check
+        cargo test --target aarch64-linux-android --workspace --no-run
+    - name: Upload Android test executables
+      if: matrix.build-type == 'release'
+      uses: actions/upload-artifact@v7
+      with:
+        name: omk-android-tests
+        path: target/aarch64-linux-android/debug/deps/
+        retention-days: 14
 
     - name: Build OhMyKeymint
       id: prepareArtifact

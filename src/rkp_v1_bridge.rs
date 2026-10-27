@@ -248,8 +248,14 @@ fn find_aidl_apk() -> Result<PathBuf> {
 #[cfg(all(target_os = "android", target_arch = "aarch64"))]
 fn trusted_system_apk(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| {
-        metadata.is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+        trusted_apk_metadata(metadata.is_file(), metadata.uid(), metadata.mode())
     })
+}
+
+#[cfg(any(all(target_os = "android", target_arch = "aarch64"), test))]
+fn trusted_apk_metadata(regular_file: bool, uid: u32, mode: u32) -> bool {
+    // Signed APEX APKs are also legitimately owned by Android's system UID.
+    regular_file && [0, 1000].contains(&uid) && mode & 0o022 == 0
 }
 
 #[cfg(all(target_os = "android", target_arch = "aarch64"))]
@@ -334,6 +340,21 @@ impl Drop for ExchangeDir {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_system_owned_apex_proxy_without_trusting_app_writable_code() {
+        assert!(trusted_apk_metadata(true, 0, 0o100644));
+        assert!(trusted_apk_metadata(true, 1000, 0o100644));
+        for (regular, uid, mode) in [
+            (true, 2000, 0o100644),
+            (true, 10000, 0o100644),
+            (true, 1000, 0o100664),
+            (true, 0, 0o100646),
+            (false, 1000, 0o40755),
+        ] {
+            assert!(!trusted_apk_metadata(regular, uid, mode));
+        }
+    }
 
     fn request(fields: [&[u8]; 4]) -> Vec<u8> {
         let mut bytes = Vec::new();

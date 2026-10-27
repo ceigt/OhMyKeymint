@@ -1698,7 +1698,8 @@ The WebUI offers Auto, V2 native, V1 AIDL and V1 native protocols. Auto attempts
 V2 native, V1 AIDL, then V1 native when the required local resources exist.
 Only local CSR construction failures permit trying another protocol. The V1
 AIDL route uses the device's system RKP proxy in an isolated Java `app_process`
-bridge. The native routes use the device's Qualcomm KeymasterUtils library in
+bridge. Trusted proxies may be owned by root or Android's system UID (1000);
+ordinary application owners and group/other-writable APKs are rejected. The native routes use the device's Qualcomm KeymasterUtils library in
 an isolated child process. Resource presence is not proof of vendor ABI or
 firmware support. V1 depends on the HAL accepting the upstream PureSoft or
 native MAC construction; it is not a universal Android provisioning API.
