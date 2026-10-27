@@ -120,7 +120,7 @@ fn writer_fixture(operation: &str, range: bool) -> Vec<u8> {
     put(&mut data, 140, 2);
     data[144..146].copy_from_slice(&1u16.to_le_bytes());
     put(&mut data, 148, 3);
-    while data.len() % 4 != 0 {
+    while !data.len().is_multiple_of(4) {
         data.push(0);
     }
     let code = data.len();

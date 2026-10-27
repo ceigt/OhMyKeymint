@@ -1755,3 +1755,9 @@ Set `JAVA_HOME` and `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) when not discoverable
 `ANDROID_BUILD_TOOLS_VERSION` can select an installed Build Tools version.
 The bridge uses reflection against the device's system RKP APK, not bundled
 vendor Binder definitions or a downloaded APK.
+
+ActivityManager process attribution reads the actual transaction constant and the
+RunningAppProcessInfo writer format from the installed trusted system framework.
+The size-prefixed format may be backported without changing SDK_INT. Process UID,
+PID, start-time and package ownership checks still apply; unsupported or malformed
+framework metadata fails closed without probing alternate Binder transactions.
