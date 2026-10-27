@@ -78,6 +78,7 @@ const rkpIssuanceBusy = computed(() => rkpIssueBusy.value || rkpListBusy.value)
 const rkpIssueError = ref('')
 const rkpIssuedArtifacts = ref<RkpIssuedArtifact[]>([])
 const pendingRkpImport = ref<RkpIssuedArtifact | null>(null)
+const rkpResultAction = ref<'import' | 'delete'>('import')
 const soterOpen = ref(false)
 const soterHalOpen = ref(false)
 const pifOpen = ref(false)
@@ -596,7 +597,8 @@ async function issueRkpKeybox(): Promise<void> {
   }
 }
 
-function requestRkpImport(artifact: RkpIssuedArtifact): void {
+function requestRkpImport(artifact: RkpIssuedArtifact, action: 'import' | 'delete' = 'import'): void {
+  rkpResultAction.value = action
   if (rkpIssuanceBusy.value) return
   rkpIssueError.value = ''
   pendingRkpImport.value = artifact
@@ -616,12 +618,13 @@ async function importRkpKeybox(): Promise<void> {
       pendingRkpImport.value = null
       return
     }
-    await cli.importIssuedRkpKeybox(artifact.id)
-    notify(i18n.t('rkp_import_completed'))
+    if (rkpResultAction.value === 'delete') await cli.deleteIssuedRkpKeybox(artifact.id)
+    else await cli.importIssuedRkpKeybox(artifact.id)
+    notify(i18n.t(rkpResultAction.value === 'delete' ? 'rkp_delete_completed' : 'rkp_import_completed'))
     rkpImportConfirmOpen.value = false
     pendingRkpImport.value = null
     await refreshRkpIssuedArtifacts()
-    await refreshIdentity(true)
+    if (rkpResultAction.value === 'import') await refreshIdentity(true)
   } catch (error) {
     rkpIssueError.value = error instanceof Error ? error.message : String(error)
     notify(rkpIssueError.value, true)
@@ -970,15 +973,19 @@ watch(rkpImportConfirmOpen, open => {
           <MiuixProgressIndicator type="circular" :size="18" />
           {{ i18n.t('rkp_list_loading') }}
         </p>
+        <p v-if="rkpIssuedArtifacts.length >= 14" role="status">{{ i18n.t('rkp_capacity_warning') }} ({{ rkpIssuedArtifacts.length }}/16)</p>
         <div v-if="rkpIssuedArtifacts.length" class="rkp-issued-list">
           <article v-for="artifact in rkpIssuedArtifacts" :key="artifact.id" class="rkp-issued-item">
             <div class="rkp-issued-item__metadata">
               <strong>{{ formatRkpCreatedAt(artifact.created_at) }}</strong>
               <span v-for="(subject, index) in artifact.chain_subjects" :key="`${artifact.id}-${index}`">{{ subject }}</span>
             </div>
-            <MiuixButton :disabled="rkpIssuanceBusy" @click="requestRkpImport(artifact)">
-              {{ i18n.t('rkp_import_button') }}
-            </MiuixButton>
+            <div class="rkp-issued-item__actions">
+              <MiuixButton :disabled="rkpIssuanceBusy" @click="requestRkpImport(artifact)">
+                {{ i18n.t('rkp_import_button') }}
+              </MiuixButton>
+              <MiuixButton :disabled="rkpIssuanceBusy || !artifact.can_delete" @click="requestRkpImport(artifact, 'delete')">{{ i18n.t('rkp_delete_button') }}</MiuixButton>
+            </div>
           </article>
         </div>
         <p v-else-if="!rkpListBusy && !rkpIssueError">{{ i18n.t('rkp_issued_empty') }}</p>
@@ -1017,12 +1024,12 @@ watch(rkpImportConfirmOpen, open => {
     </MiuixDialog>
     <MiuixDialog
       :model-value="rkpImportConfirmOpen"
-      :title="i18n.t('rkp_import_confirm_title')"
+      :title="i18n.t(rkpResultAction === 'delete' ? 'rkp_delete_button' : 'rkp_import_confirm_title')"
       :close-on-click-modal="!rkpIssueBusy"
       @update:model-value="value => { if (!rkpIssueBusy) rkpImportConfirmOpen = value }"
     >
       <div class="confirm-sheet" :aria-busy="rkpIssueBusy">
-        <p>{{ i18n.t('rkp_import_warning') }}</p>
+        <p>{{ i18n.t(rkpResultAction === 'delete' ? 'rkp_delete_warning' : 'rkp_import_warning') }}</p>
         <p v-if="pendingRkpImport">{{ formatRkpCreatedAt(pendingRkpImport.created_at) }}<br>{{ pendingRkpImport.chain_subjects.join(' · ') }}</p>
         <p v-if="rkpIssueError" role="alert">{{ rkpIssueError }}</p>
         <p v-if="rkpIssueBusy" role="status">{{ i18n.t('rkp_import_running') }}</p>
@@ -1032,7 +1039,7 @@ watch(rkpImportConfirmOpen, open => {
           </MiuixButton>
           <MiuixButton type="primary" :disabled="rkpIssueBusy" @click="importRkpKeybox">
             <MiuixProgressIndicator v-if="rkpIssueBusy" type="circular" :size="18" />
-            {{ i18n.t('rkp_import_confirm') }}
+            {{ i18n.t(rkpResultAction === 'delete' ? 'rkp_delete_button' : 'rkp_import_confirm') }}
           </MiuixButton>
         </div>
       </div>

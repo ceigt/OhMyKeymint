@@ -1060,7 +1060,22 @@ fn handle_local_rkp_command(
             }
             local_rkp_artifacts::import(&id).map(|()| "rkp_imported".into())
         }
+        "--webui-rkp-delete" => {
+            let Some(id) = args.next() else {
+                return Some(Err("RKP deletion requires an artifact ID".into()));
+            };
+            if args.next().as_deref() != Some("--confirm-delete") || args.next().is_some() {
+                return Some(Err("RKP deletion requires --confirm-delete".into()));
+            }
+            local_rkp_artifacts::delete(&id).map(|()| "rkp_deleted".into())
+        }
         "--webui-rkp-renewal" => rkp_renewal::command(args.collect()),
+        "--rkp-renewal-ensure" => {
+            if args.next().is_some() {
+                return Some(Err("Renewal supervisor accepts no arguments".into()));
+            }
+            rkp_renewal::start_worker().map(|()| String::new())
+        }
         "--rkp-renewal-worker" => {
             if args.next().is_some() {
                 return Some(Err("Renewal worker accepts no arguments".into()));
@@ -1368,6 +1383,10 @@ mod tests {
             vec!["--webui-rkp-import"],
             vec!["--webui-rkp-import", "a"],
             vec!["--webui-rkp-import", "a", "--confirm-replace", "extra"],
+            vec!["--webui-rkp-delete"],
+            vec!["--webui-rkp-delete", "a"],
+            vec!["--webui-rkp-delete", "a", "--confirm-delete", "extra"],
+            vec!["--rkp-renewal-ensure", "extra"],
             vec!["--rkp-native-worker"],
             vec!["--rkp-native-worker", "/tmp", "extra"],
         ] {

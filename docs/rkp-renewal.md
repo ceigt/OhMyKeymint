@@ -13,11 +13,17 @@ when that is the device's known working protocol. Enabling requires consent to f
 network requests, replacement, and OMK's existing retirement of keys bound to an old
 attestation identity. Restoring a Keybox does not restore retired app keys.
 
-The native root worker checks dates locally every six hours. Only the final day triggers
+The native root worker checks dates locally every six hours. The module daemon checks
+the worker singleton once per minute and restarts a missing worker when consent or
+recovery requires it. The WebUI reports both consent and live worker status. Only the final day triggers
 issuance, with a persisted limit of two attempts in a rolling 24 hours. Clock rollback,
 ambiguous submissions and unresolved replacement operations pause the worker.
 A failed or interrupted pre-submission attempt retains its budget and retries only
-after the persisted cooldown. Acknowledging an
+after the persisted cooldown. Safe error codes, stages, timestamps and retry deadlines
+are shown without CSR or response bodies. A failed public revocation-list download
+keeps the pending candidate and retries after 15 minutes, one hour and three hours;
+further failures pause for manual review. These read-only retries never spend the
+signing submission budget. Acknowledging an
 ambiguous submission retains a 24-hour cooldown. Disable Duck automatic renewal before
 enabling OMK renewal. The worker does not alter TEE, provisioning, firmware or device IDs.
 
@@ -36,8 +42,13 @@ PIF or patch update between operations becomes the next snapshot. Failure restor
 still safe to do so; unresolved recovery pauses instead of overwriting another Keybox.
 A restart recovers an unfinished transaction before allowing another submission.
 Only unchanged, expired artifacts created by automatic renewal are cleaned up; current,
-pending and manually issued artifacts are retained. All renewal secrets/state are under
+pending and manually issued artifacts are retained automatically. The staged-results
+dialog offers explicit deletion, protects active and unfinished-operation results,
+and warns near the 16-result capacity. Deletion never changes the installed Keybox. All renewal secrets/state are under
 `/data/misc/keystore/omk/data/rkp-renewal/`, root-only, with bounded reads.
+
+The shared data lock covers only the initial configuration snapshot, not network
+requests or vendor CSR calls. Configuration is checked again before submission.
 
 PIF fingerprint and synchronized trust patches can independently affect Play Integrity.
 A valid certificate and a successful KeyMint load do not establish DEVICE or STRONG.

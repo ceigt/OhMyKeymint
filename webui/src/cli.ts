@@ -21,9 +21,6 @@ const MAX_DIAGNOSTICS_JSON_BYTES = 8 * 1024
 const MAX_KEYBOX_INSPECTOR_JSON_BYTES = 32 * 1024
 const MAX_RKP_ISSUED_JSON_BYTES = 512 * 1024
 const MAX_APP_PATCH_LEVELS_JSON_BYTES = 64 * 1024
-const DEFAULT_SOTER_RELAY_URL = 'http://110.40.170.96:10886'
-const DEFAULT_SOTER_RELAY_DEVICE_ID = 'device-b-c3f204aa'
-const DEFAULT_SOTER_RELAY_TOKEN = 'aY7kRSDDR6PMmamlKwtgf7mQgr-X5uFd'
 const MAX_PIF_DEVICES = 64
 const MAX_PIF_MODEL_LENGTH = 128
 const MAX_PIF_PRODUCT_LENGTH = 128
@@ -115,6 +112,7 @@ export interface KeyboxInspector {
 }
 
 export interface RkpIssuedArtifact {
+  can_delete: boolean
   id: string
   created_at: number
   chain_subjects: string[]
@@ -212,7 +210,8 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: readonly string[])
 
 function parseRkpIssuedArtifact(value: unknown): RkpIssuedArtifact {
   if (!isRecord(value)
-      || !hasOnlyKeys(value, ['id', 'created_at', 'chain_subjects'])
+      || !hasOnlyKeys(value, ['id', 'created_at', 'chain_subjects', 'can_delete'])
+      || typeof value.can_delete !== 'boolean'
       || typeof value.id !== 'string'
       || !/^[a-f0-9]{32}$/.test(value.id)
       || typeof value.created_at !== 'number'
@@ -229,6 +228,7 @@ function parseRkpIssuedArtifact(value: unknown): RkpIssuedArtifact {
     id: value.id,
     created_at: value.created_at,
     chain_subjects: value.chain_subjects as string[],
+    can_delete: value.can_delete as boolean,
   }
 }
 
@@ -566,6 +566,13 @@ export class Cli {
     return parseRkpIssuedArtifact(parseCanonicalJson(output, 'issued RKP metadata'))
   }
 
+  async deleteIssuedRkpKeybox(id: string): Promise<void> {
+    if (!/^[a-f0-9]{32}$/.test(id)) throw new Error('Invalid RKP result ID')
+    const {keymint} = await this.#getHelperPaths()
+    const output = await this.#run(keymint, ['--webui-rkp-delete', id, '--confirm-delete'], 256)
+    if (output !== 'rkp_deleted') throw new Error('Unexpected RKP deletion result')
+  }
+
   async listIssuedRkpKeyboxes(): Promise<RkpIssuedArtifact[]> {
     const { keymint } = await this.#getHelperPaths()
     const output = await this.#run(keymint, ['--webui-rkp-list'], MAX_RKP_ISSUED_JSON_BYTES)
@@ -727,15 +734,7 @@ export class Cli {
 
   async setSoterHal(state: SoterHalState): Promise<SoterHalState> {
     const { keymint } = await this.#getHelperPaths()
-    // Native save resolves empty relay identity fields to the module defaults,
-    // including when the relay is currently disabled. Normalize before the
-    // write so the mandatory read-back check compares effective values.
-    const effectiveState: SoterHalState = {
-      ...state,
-      url: state.url || DEFAULT_SOTER_RELAY_URL,
-      token: state.token || DEFAULT_SOTER_RELAY_TOKEN,
-      device_id: state.device_id || DEFAULT_SOTER_RELAY_DEVICE_ID,
-    }
+    const effectiveState: SoterHalState = { ...state }
     const json = JSON.stringify(effectiveState)
     if (new TextEncoder().encode(json).byteLength > MAX_SOTER_HAL_JSON_BYTES) {
       throw new Error('Soter HAL configuration exceeds the byte limit')

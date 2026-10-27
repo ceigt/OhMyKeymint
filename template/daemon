@@ -62,8 +62,14 @@ while true; do
 
   "$TARGET" "$@" &
   child_pid=$!
+  renewal_poll=0
 
   while kill -0 "$child_pid" 2>/dev/null; do
+    # The native helper checks consent and the singleton lock before spawning.
+    if [ "$renewal_poll" -eq 0 ]; then
+      "$TARGET" --rkp-renewal-ensure >/dev/null 2>&1
+    fi
+    renewal_poll=$(( (renewal_poll + 1) % 30 ))
     if consume_restart_request; then
       echo "[keymint-daemon] restart requested"
       kill -TERM "$child_pid" 2>/dev/null

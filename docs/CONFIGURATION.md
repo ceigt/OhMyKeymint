@@ -1763,3 +1763,13 @@ wrapper that copies into the generated process Parcelable is resolved through
 its exact framework delegate and register contract. Process UID,
 PID, start-time and package ownership checks still apply; unsupported or malformed
 framework metadata fails closed without probing alternate Binder transactions.
+
+
+## Soter relay transport
+
+Remote Soter forwarding is off by default. No public endpoint, device ID or shared
+access token is filled in. Configure a trusted HTTPS endpoint, its independent access
+token and device ID before enabling forwarding or selecting a remote Soter app.
+Enabled forwarding requires TLS certificate verification. Incomplete or legacy
+settings may remain stored while forwarding is disabled so they can be corrected.
+The local software Soter mode does not require a relay.

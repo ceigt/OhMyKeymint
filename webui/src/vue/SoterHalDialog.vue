@@ -19,9 +19,6 @@ const emit = defineEmits<{
 }>()
 
 const preview = isDev()
-const DEFAULT_RELAY_URL = 'http://110.40.170.96:10886'
-const DEFAULT_RELAY_DEVICE_ID = 'device-b-c3f204aa'
-const DEFAULT_RELAY_TOKEN = 'aY7kRSDDR6PMmamlKwtgf7mQgr-X5uFd'
 const enabled = ref(false)
 const remoteEnabled = ref(false)
 const appEnabled = ref(false)
@@ -63,9 +60,10 @@ const canApply = computed(() => {
   if (!state) return false
   if (state.remote_enabled && (!state.url.trim() || !state.token.trim() || !state.device_id.trim())) return false
   if (state.remote_enabled) {
+    if (state.tls_insecure) return false
     try {
       const parsed = new URL(state.url)
-      if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname
+      if (parsed.protocol !== 'https:' || !parsed.hostname
           || parsed.username || parsed.password) return false
     } catch { return false }
   }
@@ -89,9 +87,9 @@ async function load(): Promise<void> {
       ? [{
           enabled: false,
           remote_enabled: false,
-          url: DEFAULT_RELAY_URL,
-          token: DEFAULT_RELAY_TOKEN,
-          device_id: DEFAULT_RELAY_DEVICE_ID,
+          url: '',
+          token: '',
+          device_id: '',
           tls_insecure: false,
           uid_map: '',
           app_enabled: false,
@@ -105,7 +103,7 @@ async function load(): Promise<void> {
     url.value = state.url
     token.value = state.token
     deviceId.value = state.device_id
-    tlsInsecure.value = state.tls_insecure
+    tlsInsecure.value = false
     uidMap.value = state.uid_map
     saved.value = { ...state }
     soterBetaEnabled.value = betaState.enabled
@@ -221,11 +219,7 @@ async function apply(): Promise<void> {
           :label="tr('soter_hal_uid_map', 'UID mapping (optional)')"
           :disabled="busy"
         />
-        <MiuixSwitchPreference
-          v-model="tlsInsecure"
-          :title="tr('soter_hal_tls_insecure', 'Accept self-signed TLS certificates')"
-          :disabled="busy"
-        />
+        <p class="soter-hal-dialog__hint">{{ i18n.t('soter_relay_https_required') }}</p>
       </template>
       <p v-if="errorMessage" class="soter-hal-dialog__error" role="alert">{{ errorMessage }}</p>
       <p v-if="preview" class="soter-hal-dialog__preview" role="status">

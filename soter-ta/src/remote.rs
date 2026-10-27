@@ -22,9 +22,6 @@ pub const CONFIG_PATH: &str = "/data/misc/keystore/omk/data/soterta/remote.conf"
 const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
 const MAX_PACKAGE_TABLE_BYTES: u64 = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const DEFAULT_RELAY_URL: &str = "http://110.40.170.96:10886";
-const DEFAULT_RELAY_DEVICE_ID: &str = "device-b-c3f204aa";
-const DEFAULT_RELAY_TOKEN: &str = "aY7kRSDDR6PMmamlKwtgf7mQgr-X5uFd";
 static CLIENT: OnceLock<Mutex<Option<(bool, reqwest::blocking::Client)>>> = OnceLock::new();
 
 #[cfg(test)]
@@ -108,22 +105,16 @@ impl Config {
         }
         pif_common::soter::validate_app_targets(&config.app_targets)?;
         if config.enabled {
-            if config.url.is_empty() {
-                config.url = DEFAULT_RELAY_URL.to_string();
-            }
-            if config.device_id.is_empty() {
-                config.device_id = DEFAULT_RELAY_DEVICE_ID.to_string();
-            }
-            if config.token.is_empty() {
-                config.token = DEFAULT_RELAY_TOKEN.to_string();
+            if config.tls_insecure {
+                return Err("SOTER relay requires TLS certificate verification".into());
             }
             let url = reqwest::Url::parse(&config.url).map_err(|_| "invalid SOTER URL")?;
-            if !matches!(url.scheme(), "http" | "https")
+            if url.scheme() != "https"
                 || url.host().is_none()
                 || !url.username().is_empty()
                 || url.password().is_some()
             {
-                return Err("SOTER URL must be HTTP(S) without embedded credentials".to_string());
+                return Err("SOTER URL must be HTTPS without embedded credentials".to_string());
             }
             if config.token.is_empty() || config.device_id.is_empty() {
                 return Err("SOTER token and device_id are required when enabled".to_string());
@@ -1067,35 +1058,16 @@ mod tests {
     #[test]
     fn separate_config_is_off_by_default_and_uid_map_is_explicit() {
         assert_eq!(Config::parse("").unwrap(), Config::default());
-        let defaults = Config::parse("enabled=true").unwrap();
-        assert_eq!(defaults.url, DEFAULT_RELAY_URL);
-        assert_eq!(defaults.device_id, DEFAULT_RELAY_DEVICE_ID);
-        assert_eq!(defaults.token, DEFAULT_RELAY_TOKEN);
-        for fields in 0..=7 {
-            let raw = format!(
-                "enabled=true\nurl={}\ndevice_id={}\ntoken={}",
-                if fields & 1 != 0 {
-                    DEFAULT_RELAY_URL
-                } else {
-                    ""
-                },
-                if fields & 2 != 0 {
-                    DEFAULT_RELAY_DEVICE_ID
-                } else {
-                    ""
-                },
-                if fields & 4 != 0 {
-                    DEFAULT_RELAY_TOKEN
-                } else {
-                    ""
-                },
-            );
-            assert!(Config::parse(&raw).unwrap() == defaults);
-        }
-        let custom_url = Config::parse("enabled=true\nurl=https://custom.example.test").unwrap();
-        assert_eq!(custom_url.url, "https://custom.example.test");
-        assert_eq!(custom_url.device_id, DEFAULT_RELAY_DEVICE_ID);
-        assert_eq!(custom_url.token, DEFAULT_RELAY_TOKEN);
+        assert!(Config::parse("enabled=true").is_err());
+        assert!(Config::parse("enabled=true\nurl=https://custom.example.test").is_err());
+        assert!(
+            Config::parse("enabled=true\nurl=http://example.test\ntoken=test\ndevice_id=test")
+                .is_err()
+        );
+        assert!(Config::parse(
+            "enabled=true\nurl=https://example.test\ntoken=test\ndevice_id=test\ntls_insecure=true"
+        )
+        .is_err());
         let cfg = Config::parse(
             "enabled=true\nurl=https://example.test\ntoken=soter-only\ndevice_id=synthetic-b\nuid_map=10001=10002",
         )
@@ -1103,9 +1075,7 @@ mod tests {
         assert_eq!(cfg.device_id, "synthetic-b");
         assert_eq!(mapped_uid(10001, &cfg.uid_map), 10002);
         assert_eq!(mapped_uid(20001, &cfg.uid_map), 20001);
-        let split = Config::parse("remote_enabled=true").unwrap();
-        assert!(split.enabled);
-        assert_eq!(split.url, DEFAULT_RELAY_URL);
+        assert!(Config::parse("remote_enabled=true").is_err());
         let body = request_body(
             &cfg,
             dispatch::TX_INIT_SIGN,

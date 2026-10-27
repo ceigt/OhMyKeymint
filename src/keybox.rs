@@ -1438,10 +1438,14 @@ pub(crate) fn rkp_expiry(contents: &[u8], allow_expired: bool) -> Result<i64> {
     Ok(expiry)
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("The public revocation list is temporarily unavailable")]
+pub(crate) struct RkpStatusUnavailable;
+
 pub(crate) fn require_live_rkp_status(contents: &[u8]) -> Result<()> {
     let keybox = KeyBox::from_xml_str(str::from_utf8(contents)?)?;
     let serials = keybox.certificate_serials()?;
-    let contents = fetch_google_attestation_status()?;
+    let contents = fetch_google_attestation_status().map_err(|_| anyhow!(RkpStatusUnavailable))?;
     if classify_google_attestation_status(&contents, &serials)? != KeyboxRevocationStatus::NotListed
     {
         bail!("New RKP certificate is revoked or suspended");

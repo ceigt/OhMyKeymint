@@ -33,6 +33,7 @@ const DAY: u64 = 86400;
 const INTERVAL: u64 = 6 * 3600;
 const MIN_CLOCK: u64 = 1735689600;
 const MAX_JSON: usize = 32768;
+const READ_RETRY_DELAYS: [u64; 3] = [900, 3600, 10800];
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +54,16 @@ struct State {
     issuing_config: String,
     transaction: Option<Transaction>,
     owned: Vec<Owned>,
+    read_retries: usize,
+    last_error: Option<Failure>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Failure {
+    code: String,
+    stage: String,
+    at: u64,
+    retry_at: Option<u64>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,14 +114,23 @@ pub(crate) fn sha256(bytes: &[u8]) -> String {
 fn now() -> Result<u64> {
     Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs())
 }
+#[cfg(test)]
+thread_local! { static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) }; }
+fn root_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = TEST_ROOT.with(|root| root.borrow().clone()) {
+        return path;
+    }
+    PathBuf::from(ROOT)
+}
 fn path(name: &str) -> PathBuf {
-    Path::new(ROOT).join(name)
+    root_dir().join(name)
 }
 fn root() -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         bail!("RKP renewal requires root");
     }
-    match fs::DirBuilder::new().mode(0o700).create(ROOT) {
+    match fs::DirBuilder::new().mode(0o700).create(root_dir()) {
         Ok(()) => (),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),
         Err(e) => return Err(e.into()),
@@ -118,7 +138,7 @@ fn root() -> Result<()> {
     let dir = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(ROOT)?;
+        .open(root_dir())?;
     let m = dir.metadata()?;
     if m.uid() != 0 || m.mode() & 0o077 != 0 {
         bail!("Renewal directory is not root-private");
@@ -173,7 +193,7 @@ fn write_private(name: &str, bytes: &[u8]) -> Result<()> {
 }
 fn remove(name: &str) -> Result<()> {
     match fs::remove_file(path(name)) {
-        Ok(()) => File::open(ROOT)?.sync_all()?,
+        Ok(()) => File::open(root_dir())?.sync_all()?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
         Err(e) => return Err(e.into()),
     }
@@ -228,6 +248,34 @@ pub(crate) fn require_no_transaction() -> Result<()> {
         bail!("Previous RKP submission is uncertain; acknowledge it in renewal settings before issuing again");
     }
     Ok(())
+}
+pub(crate) fn artifact_can_delete(id: &str, hash: &str) -> Result<bool> {
+    let state: State = load("state.json")?;
+    let trace: Issuance = load("issuance.json")?;
+    let active = sha256(&read_keybox()?);
+    let loaded = receipt().ok().map(|receipt| receipt.sha256);
+    Ok(loaded.as_deref() != Some(hash) && artifact_is_removable(&state, &trace, id, hash, &active))
+}
+fn artifact_is_removable(
+    state: &State,
+    trace: &Issuance,
+    id: &str,
+    hash: &str,
+    active: &str,
+) -> bool {
+    hash != active
+        && state.transaction.is_none()
+        && state.issuing_source.is_none()
+        && trace.stage != "submitted"
+        && state
+            .pending
+            .as_ref()
+            .is_none_or(|p| p.id != id && p.target_hash != hash && p.source_hash != hash)
+}
+pub(crate) fn forget_artifact(id: &str) -> Result<()> {
+    let mut state: State = load("state.json")?;
+    state.owned.retain(|item| item.id != id);
+    save("state.json", &state)
 }
 pub(crate) fn begin_manual_issuance(protocol: Protocol) -> Result<()> {
     let mut trace: Issuance = load("issuance.json")?;
@@ -307,7 +355,7 @@ fn process_start(pid: u32) -> Result<String> {
         .context("missing process start time")?
         .into())
 }
-fn config_hash() -> Result<String> {
+pub(crate) fn config_hash() -> Result<String> {
     let mut bytes = Vec::new();
     for name in [
         crate::root_path!("config.toml"),
@@ -418,23 +466,39 @@ fn recover(state: &mut State) -> Result<()> {
         return Ok(());
     };
     let backup = read_bounded(&path("rollback.xml"), 0, keybox::MAX_KEYBOX_XML_BYTES)?;
-    if sha256(&backup) != t.source_hash {
+    let current = sha256(&read_keybox()?);
+    let source_hash = t.source_hash.clone();
+    recover_with(state, &backup, &current, |restore| {
+        if restore {
+            let before = receipt().ok();
+            let config = config_hash()?;
+            keybox::replace_keybox_if_current(&current, &backup)?;
+            let before =
+                before.context("Original file restored; waiting for OMK to confirm loading it")?;
+            await_load(&source_hash, &before, &config)?;
+        } else if receipt()?.sha256 != source_hash {
+            bail!("Restored Keybox load is not confirmed");
+        }
+        Ok(())
+    })
+}
+fn recover_with(
+    state: &mut State,
+    backup: &[u8],
+    current: &str,
+    confirm: impl FnOnce(bool) -> Result<()>,
+) -> Result<()> {
+    let t = state
+        .transaction
+        .as_ref()
+        .context("No recovery transaction")?;
+    if sha256(backup) != t.source_hash {
         bail!("Rollback backup hash mismatch");
     }
-    let current = sha256(&read_keybox()?);
     if current != t.source_hash && current != t.target_hash {
         bail!("A different Keybox was installed; refusing to overwrite it");
     }
-    if current == t.target_hash {
-        let before = receipt().ok();
-        let config = config_hash()?;
-        keybox::replace_keybox_if_current(&current, &backup)?;
-        let before =
-            before.context("Original file restored; waiting for OMK to confirm loading it")?;
-        await_load(&t.source_hash, &before, &config)?;
-    } else if receipt()?.sha256 != t.source_hash {
-        bail!("Restored Keybox load is not confirmed");
-    }
+    confirm(current == t.target_hash)?;
     state.transaction = None;
     state.blocked = Some("Replacement was rolled back; review before resuming".into());
     save("state.json", state)?;
@@ -466,16 +530,34 @@ fn apply(c: &Consent, state: &mut State) -> Result<()> {
         bail!("Configuration changed before replacement");
     }
     same_consent(c)?;
-    write_private("rollback.xml", &source)?;
+    replace_with_confirmation(
+        state,
+        &source,
+        &pending,
+        || {
+            same_consent(c)?;
+            keybox::replace_keybox_if_current(&pending.source_hash, &candidate)?;
+            await_load(&pending.target_hash, &before, &pending.config)
+        },
+        recover,
+    )?;
+    cleanup(state)
+}
+fn replace_with_confirmation(
+    state: &mut State,
+    source: &[u8],
+    pending: &Pending,
+    replace: impl FnOnce() -> Result<()>,
+    rollback: impl FnOnce(&mut State) -> Result<()>,
+) -> Result<()> {
+    write_private("rollback.xml", source)?;
     state.transaction = Some(Transaction {
         source_hash: pending.source_hash.clone(),
         target_hash: pending.target_hash.clone(),
     });
     save("state.json", state)?;
-    same_consent(c)?;
-    keybox::replace_keybox_if_current(&pending.source_hash, &candidate)?;
-    if let Err(error) = await_load(&pending.target_hash, &before, &pending.config) {
-        recover(state).context("Automatic rollback needs attention")?;
+    if let Err(error) = replace() {
+        rollback(state).context("Automatic rollback needs attention")?;
         return Err(error);
     }
     state.transaction = None;
@@ -483,9 +565,10 @@ fn apply(c: &Consent, state: &mut State) -> Result<()> {
     state.issuing_source = None;
     state.last_success = now()?;
     state.blocked = None;
+    state.read_retries = 0;
+    state.last_error = None;
     save("state.json", state)?;
-    remove("rollback.xml")?;
-    cleanup(state)
+    remove("rollback.xml")
 }
 fn cleanup(state: &mut State) -> Result<()> {
     let current = sha256(&read_keybox()?);
@@ -553,6 +636,41 @@ fn recover_completed_issuance(state: &mut State) -> Result<()> {
     state.issuing_source = None;
     save("state.json", state)
 }
+fn record_failure(state: &mut State, code: &str, stage: &str, retry_at: Option<u64>) -> Result<()> {
+    state.last_error = Some(Failure {
+        code: code.into(),
+        stage: stage.into(),
+        at: now()?,
+        retry_at,
+    });
+    save("state.json", state)
+}
+fn apply_pending(c: &Consent, state: &mut State) -> Result<()> {
+    match apply(c, state) {
+        Ok(()) => Ok(()),
+        Err(error) if state.transaction.is_none() && error.is::<keybox::RkpStatusUnavailable>() => {
+            schedule_validation_retry(state)
+        }
+        Err(error) => Err(error),
+    }
+}
+fn schedule_validation_retry(state: &mut State) -> Result<()> {
+    let delay = READ_RETRY_DELAYS.get(state.read_retries).copied();
+    state.read_retries = state.read_retries.saturating_add(1);
+    if let Some(delay) = delay {
+        state.next_check = now()?.saturating_add(delay);
+    } else {
+        state.blocked = Some(
+            "Revocation checks failed repeatedly; review network access before resuming".into(),
+        );
+    }
+    record_failure(
+        state,
+        "revocation_network",
+        "validation",
+        delay.map(|_| state.next_check),
+    )
+}
 fn tick() -> Result<()> {
     let mut state: State = load("state.json")?;
     if state.transaction.is_some() {
@@ -566,18 +684,20 @@ fn tick() -> Result<()> {
         return Ok(());
     }
     let time = now()?;
-    let source = read_keybox()?;
-    let expiry = keybox::rkp_expiry(&source, true)?;
-    let should_issue = due(time, &state, expiry)?;
+    // Check the clock even on idle polls, before doing expensive key/chain validation.
+    due(time, &state, i64::MAX)?;
     if time < state.next_check {
         return Ok(());
     }
+    let source = read_keybox()?;
+    let expiry = keybox::rkp_expiry(&source, true)?;
+    let should_issue = due(time, &state, expiry)?;
     state.last_check = time;
     state.next_check = time + INTERVAL;
     save("state.json", &state)?;
     cleanup(&mut state)?;
     if state.pending.is_some() {
-        return apply(&c, &mut state);
+        return apply_pending(&c, &mut state);
     }
     if !should_issue {
         return Ok(());
@@ -602,12 +722,17 @@ fn tick() -> Result<()> {
                 state.blocked =
                     Some("Submission outcome is uncertain; inspect before resuming".into());
                 save("state.json", &state)?;
+                record_failure(&mut state, "submission_uncertain", "submission", None)?;
                 return Err(e);
             }
             // The journal is fsynced before POST; preparing means no certificate
             // request was submitted. Retry only after the persisted cooldown.
             state.issuing_source = None;
-            save("state.json", &state)?;
+            let code = e
+                .downcast_ref::<local_rkp::IssueFailure>()
+                .map_or("pre_submission", |error| error.code());
+            let retry_at = state.next_check;
+            record_failure(&mut state, code, "preparation", Some(retry_at))?;
             return Ok(());
         }
     };
@@ -626,7 +751,7 @@ fn tick() -> Result<()> {
         target_hash,
     });
     save("state.json", &state)?;
-    apply(&c, &mut state)
+    apply_pending(&c, &mut state)
 }
 fn module_active() -> bool {
     let module = Path::new("/data/adb/modules/oh_my_keymint");
@@ -636,12 +761,15 @@ pub fn start_worker() -> Result<()> {
     if unsafe { libc::geteuid() } != 0 {
         bail!("Renewal worker requires root");
     }
-    if !Path::new(ROOT).try_exists()? {
+    if !module_active() || !Path::new(ROOT).try_exists()? {
         return Ok(());
     }
     root()?;
     let state: State = load("state.json")?;
     if consent()?.is_none() && state.transaction.is_none() {
+        return Ok(());
+    }
+    if worker_running()? {
         return Ok(());
     }
     Command::new(std::env::current_exe()?)
@@ -651,6 +779,31 @@ pub fn start_worker() -> Result<()> {
         .stderr(Stdio::null())
         .spawn()?;
     Ok(())
+}
+fn worker_running() -> Result<bool> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path("worker.lock"))
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let m = file.metadata()?;
+    if !m.is_file() || m.uid() != 0 || m.mode() & 0o077 != 0 || m.nlink() != 1 {
+        bail!("Unsafe worker lock file");
+    }
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        return Ok(false);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(true)
+    } else {
+        Err(error.into())
+    }
 }
 pub fn worker() -> Result<()> {
     root()?;
@@ -664,9 +817,11 @@ pub fn worker() -> Result<()> {
                 if tick().is_err() {
                     let mut state: State = load("state.json")?;
                     // Safe local errors only: never store network response bodies or CSR data.
-                    state.blocked =
-                        Some("Renewal paused; review local state before resuming".into());
-                    save("state.json", &state)?;
+                    if state.blocked.is_none() {
+                        state.blocked =
+                            Some("Renewal paused; review local state before resuming".into());
+                        record_failure(&mut state, "local_state", "recovery", None)?;
+                    }
                 }
             }
         }
@@ -679,6 +834,7 @@ pub fn worker() -> Result<()> {
 #[derive(Serialize)]
 struct Status {
     enabled: bool,
+    worker_running: bool,
     protocol: Option<String>,
     last_successful_protocol: Option<String>,
     expires_at: Option<i64>,
@@ -689,6 +845,7 @@ struct Status {
     pending: bool,
     recovery_required: bool,
     issuance_stage: String,
+    last_error: Option<Failure>,
 }
 fn status() -> Result<String> {
     let state: State = load("state.json")?;
@@ -696,6 +853,7 @@ fn status() -> Result<String> {
     let c = consent()?;
     serde_json::to_string(&Status {
         enabled: c.is_some(),
+        worker_running: worker_running()?,
         protocol: c.map(|v| v.protocol),
         last_successful_protocol: trace.last_successful_protocol,
         expires_at: read_keybox()
@@ -708,6 +866,7 @@ fn status() -> Result<String> {
         pending: state.pending.is_some(),
         recovery_required: state.transaction.is_some(),
         issuance_stage: trace.stage,
+        last_error: state.last_error,
     })
     .map_err(Into::into)
 }
@@ -801,6 +960,8 @@ pub fn command(args: Vec<String>) -> Result<String> {
                 }
             }
             state.blocked = None;
+            state.read_retries = 0;
+            state.last_error = None;
             state.last_check = time;
             save("state.json", &state)?;
             start_worker()?;
@@ -816,6 +977,8 @@ pub fn command(args: Vec<String>) -> Result<String> {
             }
             state.pending = None;
             state.blocked = None;
+            state.read_retries = 0;
+            state.last_error = None;
             save("state.json", &state)?;
         }
         ["recover", "--confirm-rollback"] => {
@@ -831,6 +994,256 @@ pub fn command(args: Vec<String>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn fixture(run: impl FnOnce()) {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                TEST_ROOT.with(|root| *root.borrow_mut() = None);
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        TEST_ROOT.with(|root| *root.borrow_mut() = Some(temp.path().to_path_buf()));
+        let _reset = Reset;
+        root().unwrap();
+        run();
+    }
+    fn pending_fixture() -> Pending {
+        Pending {
+            config: "snapshot".into(),
+            id: "a".repeat(32),
+            source_hash: sha256(b"old"),
+            target_hash: sha256(b"new"),
+        }
+    }
+    #[test]
+    fn replacement_journal_is_durable_before_swap_and_success_is_committed() {
+        fixture(|| {
+            let p = pending_fixture();
+            let mut state = State {
+                pending: Some(p.clone()),
+                ..Default::default()
+            };
+            replace_with_confirmation(
+                &mut state,
+                b"old",
+                &p,
+                || {
+                    let saved: State = load("state.json")?;
+                    assert!(saved.transaction.is_some());
+                    assert_eq!(&**read_bounded(&path("rollback.xml"), 0, 64)?, b"old");
+                    Ok(())
+                },
+                |_| panic!("success must not roll back"),
+            )
+            .unwrap();
+            let saved: State = load("state.json").unwrap();
+            assert!(
+                saved.pending.is_none() && saved.transaction.is_none() && saved.last_success > 0
+            );
+            assert!(!path("rollback.xml").exists());
+        });
+    }
+    #[test]
+    fn failed_confirmation_rolls_back_and_retains_pending_candidate() {
+        fixture(|| {
+            let p = pending_fixture();
+            let mut state = State {
+                pending: Some(p.clone()),
+                ..Default::default()
+            };
+            let restored = std::cell::Cell::new(false);
+            assert!(replace_with_confirmation(
+                &mut state,
+                b"old",
+                &p,
+                || bail!("no load receipt"),
+                |state| {
+                    recover_with(state, b"old", &p.target_hash, |restore| {
+                        assert!(restore);
+                        restored.set(true);
+                        Ok(())
+                    })
+                }
+            )
+            .is_err());
+            let saved: State = load("state.json").unwrap();
+            assert!(
+                restored.get()
+                    && saved.transaction.is_none()
+                    && saved.pending.is_some()
+                    && saved.blocked.is_some()
+            );
+        });
+    }
+    #[test]
+    fn interrupted_replacement_recovers_both_pre_swap_and_post_swap_states() {
+        for swapped in [false, true] {
+            fixture(|| {
+                let p = pending_fixture();
+                write_private("rollback.xml", b"old").unwrap();
+                let state = State {
+                    pending: Some(p.clone()),
+                    transaction: Some(Transaction {
+                        source_hash: p.source_hash.clone(),
+                        target_hash: p.target_hash.clone(),
+                    }),
+                    ..Default::default()
+                };
+                save("state.json", &state).unwrap();
+                drop(state);
+                let mut restarted: State = load("state.json").unwrap();
+                recover_with(
+                    &mut restarted,
+                    b"old",
+                    if swapped {
+                        &p.target_hash
+                    } else {
+                        &p.source_hash
+                    },
+                    |restore| {
+                        assert_eq!(restore, swapped);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                let saved: State = load("state.json").unwrap();
+                assert!(
+                    saved.transaction.is_none()
+                        && saved.pending.is_some()
+                        && saved.blocked.is_some()
+                );
+            });
+        }
+    }
+    #[test]
+    fn recovery_never_overwrites_foreign_keys_or_discards_an_unconfirmed_backup() {
+        fixture(|| {
+            let p = pending_fixture();
+            write_private("rollback.xml", b"old").unwrap();
+            let mut state = State {
+                transaction: Some(Transaction {
+                    source_hash: p.source_hash.clone(),
+                    target_hash: p.target_hash.clone(),
+                }),
+                ..Default::default()
+            };
+            save("state.json", &state).unwrap();
+            assert!(
+                recover_with(&mut state, b"corrupt", &p.target_hash, |_| panic!(
+                    "corrupt backup"
+                ))
+                .is_err()
+            );
+            assert!(recover_with(&mut state, b"old", "foreign", |_| panic!(
+                "foreign replacement"
+            ))
+            .is_err());
+            assert!(recover_with(&mut state, b"old", &p.target_hash, |_| bail!(
+                "restore not confirmed"
+            ))
+            .is_err());
+            assert!(
+                load::<State>("state.json").unwrap().transaction.is_some()
+                    && path("rollback.xml").exists()
+            );
+        });
+    }
+    #[test]
+    fn storage_failure_prevents_keybox_swap() {
+        fixture(|| {
+            let p = pending_fixture();
+            let mut state = State::default();
+            fs::create_dir(path("state.json")).unwrap();
+            assert!(replace_with_confirmation(
+                &mut state,
+                b"old",
+                &p,
+                || panic!("journal was not committed"),
+                |_| panic!("no swap occurred")
+            )
+            .is_err());
+        });
+    }
+    #[test]
+    fn read_only_retries_keep_candidate_and_do_not_spend_signing_budget() {
+        fixture(|| {
+            let mut state = State {
+                pending: Some(pending_fixture()),
+                attempts: vec![now().unwrap()],
+                ..Default::default()
+            };
+            for delay in READ_RETRY_DELAYS {
+                let before = now().unwrap();
+                schedule_validation_retry(&mut state).unwrap();
+                let saved: State = load("state.json").unwrap();
+                assert!(saved.pending.is_some() && saved.blocked.is_none());
+                assert!((before + delay..=now().unwrap() + delay).contains(&saved.next_check));
+                assert_eq!(saved.attempts.len(), 1);
+            }
+            schedule_validation_retry(&mut state).unwrap();
+            assert!(state.blocked.is_some());
+            assert!(state.last_error.as_ref().unwrap().retry_at.is_none());
+            assert_eq!(state.attempts.len(), 1);
+        });
+    }
+    #[test]
+    fn worker_status_checks_the_live_singleton_lock() {
+        fixture(|| {
+            assert!(!worker_running().unwrap());
+            let worker = lock(&path("worker.lock"), 0, true).unwrap();
+            assert!(worker_running().unwrap());
+            drop(worker);
+            assert!(!worker_running().unwrap());
+        });
+    }
+    #[test]
+    fn deletion_protects_active_pending_and_recovery_results() {
+        let mut state = State::default();
+        let mut trace = Issuance::default();
+        assert!(!artifact_is_removable(
+            &state, &trace, "id", "active", "active"
+        ));
+        assert!(artifact_is_removable(
+            &state, &trace, "id", "other", "active"
+        ));
+        state.pending = Some(pending_fixture());
+        let p = state.pending.as_ref().unwrap();
+        assert!(!artifact_is_removable(
+            &state, &trace, &p.id, "other", "active"
+        ));
+        assert!(!artifact_is_removable(
+            &state,
+            &trace,
+            "id",
+            &p.target_hash,
+            "active"
+        ));
+        assert!(!artifact_is_removable(
+            &state,
+            &trace,
+            "id",
+            &p.source_hash,
+            "active"
+        ));
+        state.pending = None;
+        trace.stage = "submitted".into();
+        assert!(!artifact_is_removable(
+            &state, &trace, "id", "other", "active"
+        ));
+        trace.stage = "completed".into();
+        state.transaction = Some(Transaction {
+            source_hash: "old".into(),
+            target_hash: "new".into(),
+        });
+        assert!(!artifact_is_removable(
+            &state, &trace, "id", "other", "active"
+        ));
+        state.transaction = None;
+        state.issuing_source = Some("old".into());
+        assert!(!artifact_is_removable(
+            &state, &trace, "id", "other", "active"
+        ));
+    }
     #[test]
     fn renewal_window_budget_and_clock() {
         let t = MIN_CLOCK + 10 * DAY;

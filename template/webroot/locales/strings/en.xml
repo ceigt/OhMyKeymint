@@ -324,4 +324,20 @@
     <string name="rkp_renewal_resume_warning">Acknowledge that any uncertain submission may have reached Google. No immediate retry is performed; the cooldown and attempt budget remain. Correct the clock first. Pending certificates are reused.</string>
     <string name="rkp_renewal_recover_warning">Restore the exact private backup only if the live Keybox still matches this transaction. This does not restore app keys already retired by OMK.</string>
     <string name="rkp_renewal_discard_warning">Stop using the pending certificate for renewal. Its staged file is retained; no active Keybox is changed.</string>
+    <string name="rkp_delete_button">Delete staged result</string>
+    <string name="rkp_delete_warning">Permanently delete this local staged copy. Active results and results needed for renewal or recovery are protected.</string>
+    <string name="rkp_delete_completed">Staged result deleted</string>
+    <string name="rkp_capacity_warning">Staged results are nearly full. Delete unneeded results before requesting another certificate.</string>
+    <string name="rkp_renewal_worker_running">Renewal worker is running</string>
+    <string name="rkp_renewal_worker_stopped">Renewal worker is stopped; the module watchdog checks it within one minute.</string>
+    <string name="rkp_renewal_next_retry">Next retry</string>
+    <string name="rkp_error_revocation_network">The public revocation list could not be downloaded. The candidate is retained.</string>
+    <string name="rkp_error_submission_uncertain">The signing submission outcome is uncertain. Review before resuming.</string>
+    <string name="rkp_error_pre_submission">Preparation failed before any certificate submission.</string>
+    <string name="rkp_error_storage_unavailable">RKP storage is unavailable or full. Remove unneeded staged results.</string>
+    <string name="rkp_error_interface_unavailable">The selected RKP interface is unavailable.</string>
+    <string name="rkp_error_challenge_network">The RKP challenge could not be downloaded.</string>
+    <string name="rkp_error_csr_failed">Local CSR construction failed. Check protocol and firmware compatibility.</string>
+    <string name="rkp_error_local_state">Local validation or recovery failed. Review state before resuming.</string>
+    <string name="soter_relay_https_required">Configure your trusted HTTPS relay and independent credentials. TLS certificate verification is required.</string>
 </resources>

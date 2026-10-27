@@ -1,13 +1,7 @@
 //! Device-backed RKP issuance, shared by explicit requests and opt-in renewal.
 // Protocols adapted from Duck-ToolBox 7567a8e084d31b1a6da3541bf0e8e2692ee45e0a (MIT).
-use std::{
-    fs::OpenOptions,
-    os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
-    },
-    time::Duration,
-};
+use std::os::unix::fs::MetadataExt;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{
@@ -70,6 +64,27 @@ struct Eek {
     p256: Vec<u8>,
     x25519: Vec<u8>,
 }
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum IssueFailure {
+    #[error("RKP storage is unavailable or full")]
+    Storage,
+    #[error("No compatible RKP interface")]
+    Interface,
+    #[error("RKP challenge could not be downloaded")]
+    Challenge,
+    #[error("Local RKP CSR construction failed")]
+    Csr,
+}
+impl IssueFailure {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Storage => "storage_unavailable",
+            Self::Interface => "interface_unavailable",
+            Self::Challenge => "challenge_network",
+            Self::Csr => "csr_failed",
+        }
+    }
+}
 
 /// Called only after the CLI's explicit confirmation. One submission at most per call.
 pub fn issue(protocol: Protocol) -> Result<String> {
@@ -87,23 +102,23 @@ pub(crate) fn issue_locked(protocol: Protocol, renewal_token: Option<&str>) -> R
     if unsafe { libc::geteuid() } != 0 {
         bail!("Local RKP issuance requires root");
     }
-    let data = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(crate::root_path!("data"))
-        .context("open OMK data directory")?;
-    let metadata = data.metadata()?;
-    if ![0, kmr_common::consts::KEYSTORE_UID].contains(&metadata.uid())
-        || metadata.mode() & 0o007 != 0
-    {
-        bail!("OMK data directory is not private");
-    }
-    if unsafe { libc::flock(data.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-        bail!("Another OMK data operation is in progress");
-    }
+    let request_config = {
+        let data_path = std::path::Path::new(crate::root_path!("data"));
+        let metadata = std::fs::symlink_metadata(data_path)?;
+        if !metadata.is_dir()
+            || ![0, kmr_common::consts::KEYSTORE_UID].contains(&metadata.uid())
+            || metadata.mode() & 0o007 != 0
+        {
+            bail!("OMK data directory is not private");
+        }
+        let _lock = crate::security_patch::acquire_data_operation_lock(
+            data_path.join("rkp-artifacts").as_path(),
+        )?;
+        crate::rkp_renewal::config_hash()?
+    };
     // Check storage before spending a server challenge. This creates only the approved
     // private result directory, never a seed, identity, device configuration, or key.
-    crate::local_rkp_artifacts::prepare()?;
+    crate::local_rkp_artifacts::prepare().context(IssueFailure::Storage)?;
     let fingerprint =
         rsproperties::get::<String>("ro.build.fingerprint").context("read build fingerprint")?;
     if fingerprint.is_empty()
@@ -112,7 +127,7 @@ pub(crate) fn issue_locked(protocol: Protocol, renewal_token: Option<&str>) -> R
     {
         bail!("device build fingerprint is missing or invalid");
     }
-    let methods = candidate_methods(protocol)?;
+    let methods = candidate_methods(protocol).context(IssueFailure::Interface)?;
     let random = SystemRandom::new();
     let private = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &random)
         .map_err(|_| anyhow!("cannot generate local P-256 key"))?;
@@ -126,7 +141,7 @@ pub(crate) fn issue_locked(protocol: Protocol, renewal_token: Option<&str>) -> R
         (int(-2), bytes(&point[1..33])),
         (int(-3), bytes(&point[33..])),
     ]);
-    let eek = fetch_eek(&fingerprint)?;
+    let eek = fetch_eek(&fingerprint).context(IssueFailure::Challenge)?;
     let mut errors = Vec::new();
     let mut successful_method = protocol;
     let mut csr = None;
@@ -142,7 +157,14 @@ pub(crate) fn issue_locked(protocol: Protocol, renewal_token: Option<&str>) -> R
             Err(error) => errors.push(format!("{}: {error:#}", method.as_str())),
         }
     }
-    let csr = csr.ok_or_else(|| anyhow!("Local CSR failed: {}", errors.join("; ")))?;
+    let csr = csr
+        .ok_or_else(|| anyhow!("Local CSR failed: {}", errors.join("; ")))
+        .context(IssueFailure::Csr)?;
+    if crate::rkp_renewal::config_hash()? != request_config {
+        bail!(
+            "Configuration changed during CSR construction; no certificate request was submitted"
+        );
+    }
     crate::rkp_renewal::before_submission(successful_method, renewal_token)?;
     let signed = submit(&csr, &eek.challenge)?;
     let chain = order_chain(&signed, point).context(SUBMISSION_UNKNOWN)?;

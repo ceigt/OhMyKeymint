@@ -324,4 +324,20 @@
     <string name="rkp_renewal_resume_warning">确认知晓结果不明的请求可能已送达 Google。不会立即重试，保留冷却时间和次数限制。请先校正时钟，已有证书将复用。</string>
     <string name="rkp_renewal_recover_warning">仅在当前 Keybox 仍属于本次操作时恢复私有备份，无法恢复 OMK 已清理的应用密钥。</string>
     <string name="rkp_renewal_discard_warning">不再使用待处理证书，保留暂存文件，不修改当前 Keybox。</string>
+    <string name="rkp_delete_button">删除暂存结果</string>
+    <string name="rkp_delete_warning">永久删除这份本地暂存副本。正在使用、等待应用和恢复所需的结果会受到保护。</string>
+    <string name="rkp_delete_completed">暂存结果已删除</string>
+    <string name="rkp_capacity_warning">暂存结果即将达到上限，请先删除不再需要的结果。</string>
+    <string name="rkp_renewal_worker_running">续签后台正在运行</string>
+    <string name="rkp_renewal_worker_stopped">续签后台已停止，模块守护程序会在一分钟内检查恢复。</string>
+    <string name="rkp_renewal_next_retry">下次重试</string>
+    <string name="rkp_error_revocation_network">暂时无法下载公共撤销列表，已保留候选证书。</string>
+    <string name="rkp_error_submission_uncertain">签发提交结果不明确，请核验后再恢复。</string>
+    <string name="rkp_error_pre_submission">提交证书申请前准备失败。</string>
+    <string name="rkp_error_storage_unavailable">RKP 暂存空间不可用或已满，请清理不需要的结果。</string>
+    <string name="rkp_error_interface_unavailable">所选 RKP 接口不可用。</string>
+    <string name="rkp_error_challenge_network">无法下载 RKP 签发挑战。</string>
+    <string name="rkp_error_csr_failed">本地 CSR 构建失败，请检查协议及固件兼容性。</string>
+    <string name="rkp_error_local_state">本地校验或恢复失败，请检查状态后再恢复。</string>
+    <string name="soter_relay_https_required">请配置可信的 HTTPS 中继及独立凭据；远程功能必须验证 TLS 证书。</string>
 </resources>

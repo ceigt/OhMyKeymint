@@ -19,6 +19,7 @@ pub struct Summary {
     pub id: String,
     pub created_at: u64,
     pub chain_subjects: Vec<String>,
+    pub can_delete: bool,
 }
 
 fn require_root() -> Result<()> {
@@ -49,6 +50,16 @@ pub fn prepare() -> Result<()> {
         Err(error) => return Err(error).context("create RKP results directory"),
     }
     let _root = private_directory(Path::new(ROOT))?;
+    // A crash after reserving or deleting a result may leave an empty directory.
+    for entry in fs::read_dir(ROOT)? {
+        let entry = entry?;
+        validate_id(&entry.file_name().to_string_lossy())?;
+        let directory = entry.path();
+        let _directory = private_directory(&directory)?;
+        if fs::read_dir(&directory)?.next().is_none() {
+            fs::remove_dir(&directory)?;
+        }
+    }
     if ids()?.len() >= MAX_ARTIFACTS {
         bail!("RKP result limit reached; remove unneeded staged results before issuing again");
     }
@@ -74,6 +85,11 @@ fn ids() -> Result<Vec<String>> {
             .into_string()
             .map_err(|_| anyhow!("invalid RKP result entry"))?;
         validate_id(&name)?;
+        let directory = Path::new(ROOT).join(&name);
+        let _directory = private_directory(&directory)?;
+        if fs::read_dir(&directory)?.next().is_none() {
+            continue;
+        }
         if ids.len() >= MAX_ARTIFACTS {
             bail!("too many RKP results");
         }
@@ -181,6 +197,7 @@ fn summary(id: &str) -> Result<Summary> {
         id: id.into(),
         created_at,
         chain_subjects,
+        can_delete: crate::rkp_renewal::artifact_can_delete(id, &crate::rkp_renewal::sha256(&xml))?,
     })
 }
 
@@ -230,9 +247,40 @@ pub(crate) fn read_private(id: &str) -> Result<Zeroizing<Vec<u8>>> {
     let (file, _) = open_result(id)?;
     read_result(file)
 }
+pub fn delete(id: &str) -> Result<()> {
+    require_root()?;
+    validate_id(id)?;
+    let _operation = crate::rkp_renewal::operation_lock()?;
+    let _keybox = crate::rkp_renewal::keybox_lock()?;
+    let bytes = read_private(id)?;
+    let hash = crate::rkp_renewal::sha256(&bytes);
+    if !crate::rkp_renewal::artifact_can_delete(id, &hash)? {
+        bail!("This result is active or protected by an unfinished renewal operation");
+    }
+    remove_owned(id, &hash)?;
+    crate::rkp_renewal::forget_artifact(id)
+}
 
 pub(crate) fn remove_owned(id: &str, expected: &str) -> Result<()> {
-    let (file, directory) = open_result(id)?;
+    validate_id(id)?;
+    let (file, directory) = match open_result(id) {
+        Ok(result) => result,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            let _root = private_directory(Path::new(ROOT))?;
+            let directory = Path::new(ROOT).join(id);
+            if directory.try_exists()? {
+                let _directory = private_directory(&directory)?;
+                fs::remove_dir(&directory)?;
+                File::open(ROOT)?.sync_all()?;
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     if crate::rkp_renewal::sha256(&read_result(file)?) != expected {
         bail!("owned RKP artifact changed; refusing cleanup");
     }
@@ -292,9 +340,10 @@ mod tests {
             id: "a".repeat(32),
             created_at: 1,
             chain_subjects: vec!["CN=test".into()],
+            can_delete: true,
         })
         .unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert_eq!(value.as_object().unwrap().len(), 4);
         for key in ["keybox_xml", "private_key", "path"] {
             assert!(value.get(key).is_none());
         }

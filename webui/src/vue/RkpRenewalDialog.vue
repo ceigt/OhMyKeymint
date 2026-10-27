@@ -35,6 +35,8 @@ watch(() => props.modelValue, open => { if (open) { state.value = null; confirma
       <p>{{ i18n.t('rkp_renewal_description') }}</p>
       <template v-if="state">
         <p>{{ i18n.t('rkp_renewal_state') }}: {{ i18n.t(state.enabled ? 'rkp_renewal_enabled' : 'rkp_renewal_disabled') }}</p>
+        <p v-if="state.enabled">{{ i18n.t(state.worker_running ? 'rkp_renewal_worker_running' : 'rkp_renewal_worker_stopped') }}</p>
+        <p v-if="state.last_error" role="alert">{{ i18n.t(`rkp_error_${state.last_error.code}`) }} · {{ date(state.last_error.at) }}<template v-if="state.last_error.retry_at"> · {{ i18n.t('rkp_renewal_next_retry') }}: {{ date(state.last_error.retry_at) }}</template></p>
         <p v-if="state.protocol">{{ i18n.t('rkp_protocol') }}: {{ label(state.protocol) }}</p>
         <p>{{ i18n.t('rkp_renewal_expiry') }}: {{ date(state.expires_at) }}</p>
         <p>{{ i18n.t('rkp_renewal_last_check') }}: {{ date(state.last_check) }}</p>

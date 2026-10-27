@@ -639,6 +639,7 @@ button { touch-action: manipulation; }
 }
 .rkp-issued-list { display: grid; gap: 10px; max-height: min(30vh, 260px); overflow-y: auto; }
 .rkp-issued-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px; border-radius: 14px; background: var(--m-color-surface-container); }
+.rkp-issued-item__actions { display: grid; gap: 6px; flex-shrink: 0; }
 .rkp-issued-item__metadata { display: grid; min-width: 0; gap: 4px; overflow-wrap: anywhere; color: var(--m-color-on-surface-variant-summary); font-size: 12px; line-height: 1.4; }
 .rkp-issued-item__metadata strong { color: var(--m-color-on-surface); font-size: 13px; }
 .rkp-loading { display: flex; align-items: center; gap: 10px; }
