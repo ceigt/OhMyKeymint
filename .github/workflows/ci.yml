@@ -92,7 +92,7 @@ jobs:
       attestations: write
     strategy:
       matrix:
-        build-type: [debug, release]
+        build-type: [release]
     
     steps:
     - name: Checkout repository
@@ -207,6 +207,7 @@ jobs:
         unset RUSTFLAGS
         python build.py --${{ matrix.build-type }}
         name=`ls target/OhMyKeymint-* | awk -F '(/|.zip)' '{print $2}'` && echo "releaseName=$name" >> $GITHUB_OUTPUT
+        sha256sum target/OhMyKeymint-*.zip > target/sha256sums.txt
         unzip target/OhMyKeymint-*.zip -d module-${{ matrix.build-type }}
 
     - name: Upload build artifacts
@@ -221,7 +222,9 @@ jobs:
       uses: actions/upload-artifact@v7
       with:
         name: omk-installable-${{ matrix.build-type }}
-        path: target/OhMyKeymint-*.zip
+        path: |
+          target/OhMyKeymint-*.zip
+          target/sha256sums.txt
         retention-days: 90
 
     - name: Attest release build provenance
