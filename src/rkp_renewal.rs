@@ -514,35 +514,44 @@ fn due(time: u64, state: &State, expiry: i64) -> Result<bool> {
             .count()
             < 2)
 }
-fn recover_completed_issuance(state: &mut State) -> Result<()> {
-    if let Some(source_hash) = state.issuing_source.clone() {
-        let trace: Issuance = load("issuance.json")?;
-        if trace.stage == "completed" {
+fn completed_artifact_id(trace: &Issuance) -> Result<Option<&str>> {
+    match trace.stage.as_str() {
+        "completed" => {
             let id = trace
                 .artifact_id
+                .as_deref()
                 .context("Completed issuance has no artifact")?;
-            let bytes = artifacts::read_private(&id)?;
-            let hash = sha256(&bytes);
-            state.pending = Some(Pending {
-                config: state.issuing_config.clone(),
-                id: id.clone(),
-                source_hash,
-                target_hash: hash.clone(),
+            artifacts::validate_id(id)?;
+            Ok(Some(id))
+        }
+        "preparing" | "acknowledged" => Ok(None),
+        _ => bail!("Previous automatic issuance has an uncertain submission state"),
+    }
+}
+fn recover_completed_issuance(state: &mut State) -> Result<()> {
+    let Some(source_hash) = state.issuing_source.clone() else {
+        return Ok(());
+    };
+    let trace: Issuance = load("issuance.json")?;
+    if let Some(id) = completed_artifact_id(&trace)? {
+        let bytes = artifacts::read_private(id)?;
+        let hash = sha256(&bytes);
+        state.pending = Some(Pending {
+            config: state.issuing_config.clone(),
+            id: id.into(),
+            source_hash,
+            target_hash: hash.clone(),
+        });
+        if !state.owned.iter().any(|item| item.id == id) {
+            state.owned.push(Owned {
+                id: id.into(),
+                hash,
+                expiry: keybox::rkp_expiry(&bytes, true)?,
             });
-            if !state.owned.iter().any(|item| item.id == id) {
-                state.owned.push(Owned {
-                    id,
-                    hash,
-                    expiry: keybox::rkp_expiry(&bytes, true)?,
-                });
-            }
-            state.issuing_source = None;
-            save("state.json", state)?;
-        } else {
-            bail!("Previous automatic issuance was interrupted; review its submission state");
         }
     }
-    Ok(())
+    state.issuing_source = None;
+    save("state.json", state)
 }
 fn tick() -> Result<()> {
     let mut state: State = load("state.json")?;
@@ -593,8 +602,13 @@ fn tick() -> Result<()> {
                 state.blocked =
                     Some("Submission outcome is uncertain; inspect before resuming".into());
                 save("state.json", &state)?;
+                return Err(e);
             }
-            return Err(e);
+            // The journal is fsynced before POST; preparing means no certificate
+            // request was submitted. Retry only after the persisted cooldown.
+            state.issuing_source = None;
+            save("state.json", &state)?;
+            return Ok(());
         }
     };
     let bytes = artifacts::read_private(&id)?;
@@ -774,6 +788,8 @@ pub fn command(args: Vec<String>) -> Result<String> {
             let mut trace: Issuance = load("issuance.json")?;
             if trace.stage == "submitted" {
                 state.next_check = state.next_check.max(trace.at.min(time).saturating_add(DAY));
+                // Persist the cooldown before acknowledging an uncertain request.
+                save("state.json", &state)?;
                 trace.stage = "acknowledged".into();
                 save("issuance.json", &trace)?;
             }
@@ -927,6 +943,27 @@ mod tests {
         fs::remove_file(temp.path().join("hard")).unwrap();
         fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
         assert!(read_bounded(&file, uid, 4).is_err());
+    }
+    #[test]
+    fn interrupted_issuance_never_blindly_retries_a_submitted_request() {
+        let mut trace = Issuance {
+            stage: "preparing".into(),
+            ..Default::default()
+        };
+        assert_eq!(completed_artifact_id(&trace).unwrap(), None);
+        trace.stage = "submitted".into();
+        assert!(completed_artifact_id(&trace).is_err());
+        trace.stage = "completed".into();
+        assert!(completed_artifact_id(&trace).is_err());
+        trace.artifact_id = Some("a".repeat(32));
+        assert_eq!(
+            completed_artifact_id(&trace).unwrap(),
+            trace.artifact_id.as_deref()
+        );
+        trace.artifact_id = Some("../escape".into());
+        assert!(completed_artifact_id(&trace).is_err());
+        trace.stage = "acknowledged".into();
+        assert_eq!(completed_artifact_id(&trace).unwrap(), None);
     }
     #[test]
     fn state_rejects_unknown_fields_and_corruption() {

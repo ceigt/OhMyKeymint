@@ -15,7 +15,9 @@ attestation identity. Restoring a Keybox does not restore retired app keys.
 
 The native root worker checks dates locally every six hours. Only the final day triggers
 issuance, with a persisted limit of two attempts in a rolling 24 hours. Clock rollback,
-ambiguous submissions and interrupted operations pause the worker. Acknowledging an
+ambiguous submissions and unresolved replacement operations pause the worker.
+A failed or interrupted pre-submission attempt retains its budget and retries only
+after the persisted cooldown. Acknowledging an
 ambiguous submission retains a 24-hour cooldown. Disable Duck automatic renewal before
 enabling OMK renewal. The worker does not alter TEE, provisioning, firmware or device IDs.
 
