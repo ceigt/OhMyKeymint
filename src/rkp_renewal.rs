@@ -773,7 +773,7 @@ pub fn command(args: Vec<String>) -> Result<String> {
             }
             let mut trace: Issuance = load("issuance.json")?;
             if trace.stage == "submitted" {
-                state.next_check = state.next_check.max(trace.at.saturating_add(DAY));
+                state.next_check = state.next_check.max(trace.at.min(time).saturating_add(DAY));
                 trace.stage = "acknowledged".into();
                 save("issuance.json", &trace)?;
             }

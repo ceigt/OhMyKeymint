@@ -187,10 +187,23 @@ jobs:
       env:
         BORINGSSL_BUILD_DIR: ${{ github.workspace }}/boringssl/build
       run: |
+        # Keep the Android target linker flags from .cargo/config.toml.
+        unset RUSTFLAGS
         cargo clippy --target aarch64-linux-android --workspace --all-targets -- -D warnings
         cargo fmt --all -- --check
-        cargo test --target aarch64-linux-android --workspace --no-run --message-format=json > android-tests.jsonl
+        cargo test --target aarch64-linux-android --workspace --no-run --message-format=json > android-tests.jsonl && test_status=0 || test_status=$?
         python scripts/collect_android_tests.py android-tests.jsonl target/android-test-bins
+        test "$test_status" -eq 0
+    - name: Upload compiler diagnostics
+      if: always()
+      uses: actions/upload-artifact@v7
+      with:
+        name: omk-android-compiler-diagnostics
+        path: |
+          android-tests.jsonl
+          Cargo.lock
+        retention-days: 14
+
     - name: Upload Android test executables
       if: matrix.build-type == 'release'
       uses: actions/upload-artifact@v7
