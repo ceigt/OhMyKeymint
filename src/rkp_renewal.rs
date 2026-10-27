@@ -244,6 +244,12 @@ pub(crate) fn before_submission(protocol: Protocol, token: Option<&str>) -> Resu
             bail!("Renewal settings changed before submission");
         }
         same_consent(&c)?;
+        let state: State = load("state.json")?;
+        if state.issuing_source.as_deref() != Some(sha256(&read_keybox()?).as_str())
+            || state.issuing_config != config_hash()?
+        {
+            bail!("Keybox, PIF or patch configuration changed before submission");
+        }
     }
     let mut trace: Issuance = load("issuance.json")?;
     trace.stage = "submitted".into();
@@ -420,9 +426,11 @@ fn recover(state: &mut State) -> Result<()> {
         bail!("A different Keybox was installed; refusing to overwrite it");
     }
     if current == t.target_hash {
-        let before = receipt()?;
+        let before = receipt().ok();
         let config = config_hash()?;
         keybox::replace_keybox_if_current(&current, &backup)?;
+        let before =
+            before.context("Original file restored; waiting for OMK to confirm loading it")?;
         await_load(&t.source_hash, &before, &config)?;
     } else if receipt()?.sha256 != t.source_hash {
         bail!("Restored Keybox load is not confirmed");
@@ -506,11 +514,7 @@ fn due(time: u64, state: &State, expiry: i64) -> Result<bool> {
             .count()
             < 2)
 }
-fn tick() -> Result<()> {
-    let mut state: State = load("state.json")?;
-    if state.transaction.is_some() {
-        return recover(&mut state);
-    }
+fn recover_completed_issuance(state: &mut State) -> Result<()> {
     if let Some(source_hash) = state.issuing_source.clone() {
         let trace: Issuance = load("issuance.json")?;
         if trace.stage == "completed" {
@@ -533,11 +537,19 @@ fn tick() -> Result<()> {
                 });
             }
             state.issuing_source = None;
-            save("state.json", &state)?;
+            save("state.json", state)?;
         } else {
             bail!("Previous automatic issuance was interrupted; review its submission state");
         }
     }
+    Ok(())
+}
+fn tick() -> Result<()> {
+    let mut state: State = load("state.json")?;
+    if state.transaction.is_some() {
+        return recover(&mut state);
+    }
+    recover_completed_issuance(&mut state)?;
     let Some(c) = consent()? else {
         return Ok(());
     };
@@ -708,7 +720,13 @@ pub fn command(args: Vec<String>) -> Result<String> {
         }
         ["enable", "--confirm-renewal", selection] => {
             let _lock = operation_lock()?;
-            require_no_transaction()?;
+            let mut state: State = load("state.json")?;
+            recover_completed_issuance(&mut state)?;
+            if state.transaction.is_some()
+                || load::<Issuance>("issuance.json")?.stage == "submitted"
+            {
+                bail!("Recover or acknowledge the unfinished operation before enabling renewal");
+            }
             no_other_manager()?;
             let protocol = if *selection == "last-success" {
                 load::<Issuance>("issuance.json")?
@@ -759,8 +777,12 @@ pub fn command(args: Vec<String>) -> Result<String> {
                 trace.stage = "acknowledged".into();
                 save("issuance.json", &trace)?;
             }
-            if state.issuing_source.is_some() && trace.stage != "completed" {
-                state.issuing_source = None;
+            if state.issuing_source.is_some() {
+                if trace.stage == "completed" {
+                    recover_completed_issuance(&mut state)?;
+                } else {
+                    state.issuing_source = None;
+                }
             }
             state.blocked = None;
             state.last_check = time;
