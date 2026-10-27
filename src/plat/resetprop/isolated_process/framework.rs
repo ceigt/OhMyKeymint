@@ -7,6 +7,7 @@ use anyhow::{anyhow, bail, Context, Result};
 const STUB: &str = "Landroid/app/IActivityManager$Stub;";
 const FIELD: &str = "TRANSACTION_getRunningAppProcesses";
 const PROCESS: &str = "Landroid/app/ActivityManager$RunningAppProcessInfo;";
+const DELEGATE: &str = "Landroid/app/RunningAppProcessInfo;";
 const MAX_DEX_SIZE: u64 = 128 * 1024 * 1024;
 
 pub(super) fn running_processes_transaction() -> Result<u32> {
@@ -217,10 +218,20 @@ impl<'a> Dex<'a> {
     // OEM ROMs may backport the size-prefixed writer without changing SDK_INT.
     // Inspect the trusted writer's first Parcel operation; never try unknown IPC layouts.
     fn structured_process_writer(&self) -> Result<Option<bool>> {
+        let Some(mut code) = self.process_writer_code(PROCESS)? else {
+            return Ok(None);
+        };
+        if self.u16(code + 16)? & 0xff == 0x22 {
+            code = self.delegated_writer_code(code)?;
+        }
+        self.writer_starts_with_size(code).map(Some)
+    }
+
+    fn process_writer_code(&self, descriptor: &str) -> Result<Option<usize>> {
         for index in 0..self.u32(96)? {
             let definition = self.table(96, 32, index)?;
             let class = self.u32(definition)?;
-            if !self.type_is(class, PROCESS)? {
+            if !self.type_is(class, descriptor)? {
                 continue;
             }
             let mut cursor = self.u32(definition + 24)? as usize;
@@ -259,13 +270,59 @@ impl<'a> Dex<'a> {
                         if code == 0 {
                             bail!("process writer has no bytecode");
                         }
-                        return self.writer_starts_with_size(code).map(Some);
+                        return Ok(Some(code));
                     }
                 }
             }
             bail!("process Parcelable has no writer");
         }
         Ok(None)
+    }
+
+    fn method_is(&self, index: u16, class: &str, name: &str) -> Result<bool> {
+        let method = self.table(88, 8, u32::from(index))?;
+        Ok(self.type_is(u32::from(self.u16(method)?), class)?
+            && self.string_is(self.u32(method + 4)?, name)?)
+    }
+
+    // The legacy API can copy into the generated Parcelable before writing it.
+    // Accept only this exact delegate and register flow, never arbitrary calls.
+    fn delegated_writer_code(&self, code: usize) -> Result<usize> {
+        if self.u32(code + 12)? != 12 {
+            bail!("unsupported process writer wrapper size");
+        }
+        let start = code + 16;
+        self.bytes(start, 24)?;
+        let words: Vec<u16> = (0..12)
+            .map(|i| self.u16(start + i * 2))
+            .collect::<Result<_>>()?;
+        let registers = self.u16(code)?;
+        let inputs = self.u16(code + 2)?;
+        if inputs != 3 || !(4..=16).contains(&registers) {
+            bail!("invalid process writer wrapper registers");
+        }
+        let original = registers - inputs;
+        let temporary = words[0] >> 8;
+        let copy_registers = original | (temporary << 4);
+        let write_registers = temporary | ((original + 1) << 4) | ((original + 2) << 8);
+        if temporary >= original
+            || words[0] & 0xff != 0x22
+            || !self.type_is(u32::from(words[1]), DELEGATE)?
+            || words[2] != 0x1070
+            || words[4] != temporary
+            || !self.method_is(words[3], DELEGATE, "<init>")?
+            || words[5] != 0x206e
+            || words[7] != copy_registers
+            || !self.method_is(words[6], PROCESS, "copyTo")?
+            || words[8] != 0x306e
+            || words[10] != write_registers
+            || !self.method_is(words[9], DELEGATE, "writeToParcel")?
+            || words[11] != 0x0e
+        {
+            bail!("unsupported process writer wrapper contract");
+        }
+        self.process_writer_code(DELEGATE)?
+            .context("delegated process writer is absent")
     }
 
     fn writer_starts_with_size(&self, code: usize) -> Result<bool> {

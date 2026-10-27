@@ -187,3 +187,111 @@ fn truncated_writer_metadata_never_selects_an_ipc_layout() {
         );
     }
 }
+
+fn delegated_fixture() -> (Vec<u8>, usize) {
+    let mut data = vec![0u8; 256];
+    data[..8].copy_from_slice(b"dex\n039\0");
+    put(&mut data, 36, 112);
+    put(&mut data, 40, 0x12345678);
+    for (header, count, offset) in [(56, 7, 112), (64, 3, 140), (88, 5, 152), (96, 2, 192)] {
+        put(&mut data, header, count);
+        put(&mut data, header + 4, offset);
+    }
+    for (i, name) in [
+        PROCESS,
+        DELEGATE,
+        "Landroid/os/Parcel;",
+        "writeToParcel",
+        "<init>",
+        "copyTo",
+        "dataPosition",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let offset = data.len() as u32;
+        put(&mut data, 112 + i * 4, offset);
+        data.push(name.len() as u8);
+        data.extend_from_slice(name.as_bytes());
+        data.push(0);
+    }
+    for i in 0..3 {
+        put(&mut data, 140 + i * 4, i as u32);
+    }
+    for (i, (class, name)) in [(0u16, 3u32), (1, 4), (0, 5), (1, 3), (2, 6)]
+        .into_iter()
+        .enumerate()
+    {
+        data[152 + i * 8..154 + i * 8].copy_from_slice(&class.to_le_bytes());
+        put(&mut data, 156 + i * 8, name);
+    }
+    put(&mut data, 224, 1);
+    while !data.len().is_multiple_of(4) {
+        data.push(0);
+    }
+    let wrapper = data.len();
+    data.resize(wrapper + 16, 0);
+    data[wrapper..wrapper + 2].copy_from_slice(&4u16.to_le_bytes());
+    data[wrapper + 2..wrapper + 4].copy_from_slice(&3u16.to_le_bytes());
+    put(&mut data, wrapper + 12, 12);
+    for word in [
+        0x0022u16, 1, 0x1070, 1, 0, 0x206e, 2, 1, 0x306e, 3, 0x0320, 0x000e,
+    ] {
+        data.extend_from_slice(&word.to_le_bytes());
+    }
+    let writer = data.len();
+    data.resize(writer + 16, 0);
+    put(&mut data, writer + 12, 3);
+    for word in [0x106eu16, 4, 3] {
+        data.extend_from_slice(&word.to_le_bytes());
+    }
+    for (definition, index, code) in [(192, 0, wrapper), (224, 3, writer)] {
+        let offset = data.len() as u32;
+        put(&mut data, definition + 24, offset);
+        data.extend_from_slice(&[0, 0, 0, 1, index, 1]);
+        let mut value = code as u32;
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            data.push(byte | if value == 0 { 0 } else { 0x80 });
+            if value == 0 {
+                break;
+            }
+        }
+    }
+    let size = data.len() as u32;
+    put(&mut data, 32, size);
+    (data, wrapper)
+}
+
+#[test]
+fn backported_legacy_wrapper_uses_the_actual_delegated_writer() {
+    let (data, _) = delegated_fixture();
+    assert_eq!(
+        Dex::new(&data)
+            .unwrap()
+            .structured_process_writer()
+            .unwrap(),
+        Some(true)
+    );
+}
+
+#[test]
+fn writer_wrapper_rejects_other_calls_and_register_contracts() {
+    let (data, wrapper) = delegated_fixture();
+    for (word, replacement) in [(1, 0u16), (3, 2), (6, 3), (7, 0), (9, 4), (10, 0), (11, 0)] {
+        let mut invalid = data.clone();
+        let offset = wrapper + 16 + word * 2;
+        invalid[offset..offset + 2].copy_from_slice(&replacement.to_le_bytes());
+        assert!(Dex::new(&invalid)
+            .unwrap()
+            .structured_process_writer()
+            .is_err());
+    }
+    let mut truncated = data.clone();
+    put(&mut truncated, wrapper + 12, 11);
+    assert!(Dex::new(&truncated)
+        .unwrap()
+        .structured_process_writer()
+        .is_err());
+}

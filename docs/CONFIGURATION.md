@@ -1758,6 +1758,8 @@ vendor Binder definitions or a downloaded APK.
 
 ActivityManager process attribution reads the actual transaction constant and the
 RunningAppProcessInfo writer format from the installed trusted system framework.
-The size-prefixed format may be backported without changing SDK_INT. Process UID,
+The size-prefixed format may be backported without changing SDK_INT. A legacy
+wrapper that copies into the generated process Parcelable is resolved through
+its exact framework delegate and register contract. Process UID,
 PID, start-time and package ownership checks still apply; unsupported or malformed
 framework metadata fails closed without probing alternate Binder transactions.
