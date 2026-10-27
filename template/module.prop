@@ -1,5 +1,5 @@
 id=oh_my_keymint
-name=Oh My Keymint (RKP Renewal)
+name=Oh My Keymint
 version=${versionName}
 versionCode=${versionCode}
 author=James Clef,ITxiao6666
