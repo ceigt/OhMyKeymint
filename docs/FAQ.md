@@ -313,7 +313,9 @@ property areas, warming up bionic's lazy mappings before inspection. If this
 cannot be installed safely, the payload restores replaced mappings and uses
 its available PLT hooks and validated AArch64 callback hook. The callback path
 checks wrapper semantics, memory mappings, and BTI/MTE permissions before
-patching libc. After specialization the payload updates Java `Build` fields.
+patching libc. Recognized stack-protected ROM wrappers retain their original
+callback adapter when forwarding non-profile properties. After specialization
+the payload updates Java `Build` fields.
 Build and native property spoofing have independent WebUI switches, both on
 by default, and are saved with Apply. The selected profile's initial API level
 is preserved, defaulting to `32` when absent. The Build path writes it to

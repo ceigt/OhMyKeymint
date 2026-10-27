@@ -1163,20 +1163,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vbmeta_state.toml");
         let lock = crate::security_patch::acquire_data_operation_lock(&path).unwrap();
-        let blocked = dir
-            .path()
-            .join(format!(".vbmeta_state.toml.tmp-{}", std::process::id()));
-        fs::create_dir(&blocked).unwrap();
-        let error = resolve_stable_vb_key(&TrustValueSpec::Auto, &path, &lock, || ResolvedField {
-            value: [0x42; 32],
-            source: TrustValueSource::RandomFallback,
+        let error = resolve_stable_vb_key(&TrustValueSpec::Auto, &path, &lock, || {
+            // Inject failure after the initial snapshot inspection. A directory
+            // target is rejected regardless of random temporary names or UID.
+            fs::create_dir(&path).unwrap();
+            ResolvedField {
+                value: [0x42; 32],
+                source: TrustValueSource::RandomFallback,
+            }
         })
         .unwrap_err();
         assert!(error
             .to_string()
             .contains("refusing to use an unstable boot key"));
-        assert!(!path.exists());
-        fs::remove_dir(blocked).unwrap();
+        assert!(path.is_dir());
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 0);
     }
 
     #[test]

@@ -994,6 +994,7 @@ pub fn command(args: Vec<String>) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     fn fixture(run: impl FnOnce()) {
         struct Reset;
         impl Drop for Reset {
@@ -1002,6 +1003,7 @@ mod tests {
             }
         }
         let temp = tempfile::tempdir().unwrap();
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700)).unwrap();
         TEST_ROOT.with(|root| *root.borrow_mut() = Some(temp.path().to_path_buf()));
         let _reset = Reset;
         root().unwrap();

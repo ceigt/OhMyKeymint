@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "OhMyKeymint"
-version = "1.3.5-renewal.2"
+version = "1.3.5-renewal.3"
 dependencies = [
  "android_logger",
  "anyhow",

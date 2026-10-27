@@ -1027,12 +1027,20 @@ mod tests {
         assert!(!local.remote_enabled);
         fs::remove_file(&flag_path).unwrap();
 
-        fs::write(&config_path, "enabled=true\n").unwrap();
+        fs::write(
+            &config_path,
+            format!("enabled=true\nurl={TEST_RELAY_URL}\ndevice_id={TEST_RELAY_DEVICE_ID}\ntoken={TEST_RELAY_TOKEN}\n"),
+        )
+        .unwrap();
         let legacy = Config::load_from_paths(&config_path, &flag_path).unwrap();
         assert!(legacy.enabled);
         assert!(legacy.remote_enabled);
 
-        fs::write(&config_path, "remote_enabled=true\n").unwrap();
+        fs::write(
+            &config_path,
+            format!("remote_enabled=true\nurl={TEST_RELAY_URL}\ndevice_id={TEST_RELAY_DEVICE_ID}\ntoken={TEST_RELAY_TOKEN}\n"),
+        )
+        .unwrap();
         let prepared = Config::load_from_paths(&config_path, &flag_path).unwrap();
         assert!(!prepared.enabled);
         assert!(prepared.remote_enabled);

@@ -398,8 +398,9 @@ path changes the stored property metadata. If the private mapping lacks
 space, has an unsupported layout, or fails installation or readback, the payload
 restores any replaced mappings and uses the existing property hooks.
 On AArch64 the callback hook is attempted only after validating the wrapper
-semantics, memory mappings, and BTI/MTE permissions. A rejected
-callback hook leaves libc unchanged, records the reason, and continues with
+semantics, memory mappings, and BTI/MTE permissions. Recognized stack-protected
+ROM wrappers retain their original callback adapter for unmodified properties.
+A rejected callback hook leaves libc unchanged, records the reason, and continues with
 the available PLT and Java paths. After specialization the payload updates Java
 `Build` fields and the integer launch SDK only when GMS Build spoofing is enabled,
 and probes 14 core identity and launch-API properties through the callback API

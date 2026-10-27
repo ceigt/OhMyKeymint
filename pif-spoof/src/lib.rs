@@ -45,7 +45,7 @@ const PROPERTY_VALUE_MAX: usize = 92;
 // AOSP prop_info's legacy value for read-only properties that exceed PROP_VALUE_MAX.
 const LONG_LEGACY_ERROR: &CStr = c"Must use __system_property_read_callback() to read";
 const BOARD_FIRST_API_LEVEL: &CStr = c"32";
-const MAX_CALLBACK_WRAPPER_INSTRUCTIONS: usize = 16;
+const MAX_CALLBACK_WRAPPER_INSTRUCTIONS: usize = 32;
 const INLINE_PATCH_BYTES: usize = 24;
 const MAX_DISPATCH_SPAN: usize = 32 * 1024 * 1024;
 
@@ -82,6 +82,7 @@ static ORIGINAL_PLT_PROPERTY_GET: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_m
 static ORIGINAL_PLT_PROPERTY_READ_LEGACY: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static SYSTEM_PROPERTIES_INSTANCE: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static SYSTEM_PROPERTIES_READ_CALLBACK: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
+static SYSTEM_PROPERTIES_CALLBACK_ADAPTER: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static PROPERTY_SPOOF: OnceLock<PropertyValues> = OnceLock::new();
 static INLINE_PROPERTY_READ_HOOKED: OnceLock<()> = OnceLock::new();
 
@@ -500,6 +501,10 @@ fn install_inline_property_hook() -> Result<usize, String> {
 
     SYSTEM_PROPERTIES_INSTANCE.store(dispatch.instance as *mut c_void, Ordering::Release);
     SYSTEM_PROPERTIES_READ_CALLBACK.store(dispatch.method as *mut c_void, Ordering::Release);
+    SYSTEM_PROPERTIES_CALLBACK_ADAPTER.store(
+        dispatch.callback_adapter.unwrap_or(0) as *mut c_void,
+        Ordering::Release,
+    );
     if let Err(error) = patch_property_read_callback(
         target.cast::<u8>(),
         property_read_inline_hook as *const () as *const c_void,
@@ -507,6 +512,7 @@ fn install_inline_property_hook() -> Result<usize, String> {
     ) {
         SYSTEM_PROPERTIES_INSTANCE.store(ptr::null_mut(), Ordering::Release);
         SYSTEM_PROPERTIES_READ_CALLBACK.store(ptr::null_mut(), Ordering::Release);
+        SYSTEM_PROPERTIES_CALLBACK_ADAPTER.store(ptr::null_mut(), Ordering::Release);
         return Err(error);
     }
     let _ = INLINE_PROPERTY_READ_HOOKED.set(());
@@ -600,9 +606,15 @@ fn log_property_probe() {
     ));
 }
 
-#[derive(Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct PropertyProbe {
+    #[cfg(test)]
+    name: Option<String>,
     value: Option<String>,
+    #[cfg(test)]
+    serial: u32,
+    #[cfg(test)]
+    calls: usize,
 }
 
 unsafe extern "C" fn property_probe_callback(
@@ -616,6 +628,18 @@ unsafe extern "C" fn property_probe_callback(
     };
     if value.is_null() {
         return;
+    }
+    #[cfg(test)]
+    {
+        if !_name.is_null() {
+            context.name = Some(
+                unsafe { CStr::from_ptr(_name) }
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        context.serial = _serial;
+        context.calls += 1;
     }
     context.value = Some(
         unsafe { CStr::from_ptr(value) }
@@ -640,6 +664,7 @@ enum RegisterValue {
 struct PropertyReadDispatch {
     instance: usize,
     method: usize,
+    callback_adapter: Option<usize>,
     wrapper_bytes: usize,
 }
 
@@ -681,6 +706,9 @@ fn decode_property_read_dispatch(
     instructions: &[u32],
     base_address: usize,
 ) -> Result<PropertyReadDispatch, String> {
+    if instructions.first() == Some(&0xd101_03ff) {
+        return decode_adapted_property_read_dispatch(instructions, base_address);
+    }
     let mut registers = [RegisterValue::Unknown; 31];
     registers[0] = RegisterValue::Argument(0);
     registers[1] = RegisterValue::Argument(1);
@@ -709,6 +737,7 @@ fn decode_property_read_dispatch(
             return Ok(PropertyReadDispatch {
                 instance,
                 method,
+                callback_adapter: None,
                 wrapper_bytes: offset + size_of::<u32>(),
             });
         }
@@ -739,6 +768,72 @@ fn decode_property_read_dispatch(
         ));
     }
     Err("property callback wrapper has no recognized tail branch".to_string())
+}
+
+// Some ROMs wrap ReadCallback with a stack-protected callback adapter. Keep
+// that adapter in the forwarding path: it may transform non-profile properties.
+// Recognize the complete captured frame/canary/argument/return sequence rather
+// than skipping arbitrary prologue instructions or accepting an arbitrary BL.
+fn decode_adapted_property_read_dispatch(
+    instructions: &[u32],
+    base_address: usize,
+) -> Result<PropertyReadDispatch, String> {
+    const WRAPPER: [u32; 25] = [
+        0xd101_03ff,
+        0xa902_7bfd,
+        0xf900_1bf3,
+        0x9100_83fd,
+        0xd53b_d053,
+        0xaa00_03e8,
+        0xd503_201f,
+        0,
+        0xf940_1669,
+        0x9100_23e3,
+        0xf81f_83a9,
+        0xa900_8be1,
+        0xd503_201f,
+        0,
+        0xaa08_03e1,
+        0,
+        0xf940_1668,
+        0xf85f_83a9,
+        0xeb09_011f,
+        0x5400_00a1,
+        0xa942_7bfd,
+        0xf940_1bf3,
+        0x9101_03ff,
+        0xd65f_03c0,
+        0,
+    ];
+    let invalid = || "unsupported adapted property callback wrapper".to_string();
+    if instructions.len() < WRAPPER.len()
+        || WRAPPER
+            .iter()
+            .enumerate()
+            .any(|(index, expected)| *expected != 0 && instructions[index] != *expected)
+        || instructions[15] & 0xfc00_0000 != 0x9400_0000
+        || instructions[24] & 0xfc00_0000 != 0x9400_0000
+    {
+        return Err(invalid());
+    }
+    let pc = |index: usize| {
+        base_address
+            .checked_add(index * size_of::<u32>())
+            .ok_or_else(invalid)
+    };
+    let (instance_register, instance) = decode_adr(instructions[7], pc(7)?).ok_or_else(invalid)?;
+    let (adapter_register, adapter) = decode_adr(instructions[13], pc(13)?).ok_or_else(invalid)?;
+    if instance_register != 0 || adapter_register != 2 || adapter != pc(WRAPPER.len())? {
+        return Err(invalid());
+    }
+    let method =
+        decode_unconditional_branch(instructions[15] ^ 0x8000_0000, pc(15)?).ok_or_else(invalid)?;
+    Ok(PropertyReadDispatch {
+        instance,
+        method,
+        callback_adapter: Some(adapter),
+        wrapper_bytes: WRAPPER.len() * size_of::<u32>(),
+    })
 }
 
 fn is_ignored_wrapper_instruction(instruction: u32) -> bool {
@@ -939,22 +1034,29 @@ fn resolve_property_read_dispatch(
         return Err("property callback dispatch addresses failed validation".to_string());
     }
 
-    let method_mapping = mapping_containing(&mappings, dispatch.method, size_of::<u32>())
-        .ok_or_else(|| "property callback method is not mapped".to_string())?;
-    if !method_mapping.readable()
-        || !method_mapping.executable()
-        || method_mapping.writable()
-        || method_mapping.device != target_mapping.device
-        || method_mapping.inode != target_mapping.inode
-    {
-        return Err("property callback method is not in the same libc text".to_string());
-    }
-    if method_mapping.bti {
-        let landing = unsafe { ptr::read(dispatch.method as *const u32) };
-        if !is_call_compatible_landing_pad(landing) {
+    for address in std::iter::once(dispatch.method).chain(dispatch.callback_adapter) {
+        let method_mapping = mapping_containing(&mappings, address, size_of::<u32>())
+            .ok_or_else(|| "property callback dispatch target is not mapped".to_string())?;
+        if !address.is_multiple_of(align_of::<u32>())
+            || address.abs_diff(target_address) > MAX_DISPATCH_SPAN
+            || !method_mapping.readable()
+            || !method_mapping.executable()
+            || method_mapping.writable()
+            || method_mapping.device != target_mapping.device
+            || method_mapping.inode != target_mapping.inode
+        {
             return Err(
-                "property callback method has no BTI-compatible call landing pad".to_string(),
+                "property callback dispatch target is not in the same libc text".to_string(),
             );
+        }
+        if method_mapping.bti {
+            let landing = unsafe { ptr::read(address as *const u32) };
+            if !is_call_compatible_landing_pad(landing) {
+                return Err(
+                    "property callback dispatch target has no BTI-compatible call landing pad"
+                        .to_string(),
+                );
+            }
         }
     }
 
@@ -1287,13 +1389,30 @@ unsafe extern "C" fn property_read_inline_hook(
         return;
     };
     let context = CallbackContext { callback, cookie };
-    unsafe {
-        method(
-            instance,
-            property,
-            Some(property_value_callback),
-            (&context as *const CallbackContext).cast_mut().cast(),
-        );
+    let adapter = SYSTEM_PROPERTIES_CALLBACK_ADAPTER.load(Ordering::Acquire);
+    if adapter.is_null() {
+        unsafe {
+            method(
+                instance,
+                property,
+                Some(property_value_callback),
+                (&context as *const CallbackContext).cast_mut().cast(),
+            );
+        }
+    } else {
+        let adapter: PropertyCallback = unsafe { std::mem::transmute(adapter) };
+        let adapted = CallbackContext {
+            callback: property_value_callback,
+            cookie: (&context as *const CallbackContext).cast_mut().cast(),
+        };
+        unsafe {
+            method(
+                instance,
+                property,
+                Some(adapter),
+                (&adapted as *const CallbackContext).cast_mut().cast(),
+            );
+        }
     }
 }
 
@@ -2209,6 +2328,7 @@ mod tests {
             PropertyReadDispatch {
                 instance: 0xfca28,
                 method: 0x5ca40,
+                callback_adapter: None,
                 wrapper_bytes: 28,
             }
         );
@@ -2236,6 +2356,7 @@ mod tests {
             PropertyReadDispatch {
                 instance,
                 method,
+                callback_adapter: None,
                 wrapper_bytes: 32,
             }
         );
@@ -2268,6 +2389,85 @@ mod tests {
         let mut call = valid;
         call[4] |= 0x8000_0000;
         assert!(decode_property_read_dispatch(&call, base).is_err());
+    }
+
+    fn adapted_callback_wrapper() -> [u32; 25] {
+        // Captured from the Ace 3 Android 16 ROM's libc export at 0x95824.
+        [
+            0xd101_03ff,
+            0xa902_7bfd,
+            0xf900_1bf3,
+            0x9100_83fd,
+            0xd53b_d053,
+            0xaa00_03e8,
+            0xd503_201f,
+            0x103c_0ec0,
+            0xf940_1669,
+            0x9100_23e3,
+            0xf81f_83a9,
+            0xa900_8be1,
+            0xd503_201f,
+            0x1000_0182,
+            0xaa08_03e1,
+            0x97ff_7da1,
+            0xf940_1668,
+            0xf85f_83a9,
+            0xeb09_011f,
+            0x5400_00a1,
+            0xa942_7bfd,
+            0xf940_1bf3,
+            0x9101_03ff,
+            0xd65f_03c0,
+            0x9401_76ef,
+        ]
+    }
+
+    #[test]
+    fn decodes_stack_protected_rom_callback_and_retains_its_adapter() {
+        let instructions = adapted_callback_wrapper();
+        assert_eq!(
+            decode_property_read_dispatch(&instructions, 0x95824).unwrap(),
+            PropertyReadDispatch {
+                instance: 0x10da18,
+                method: 0x74ee4,
+                callback_adapter: Some(0x95888),
+                wrapper_bytes: 100,
+            }
+        );
+        let base = 0x1000_0000;
+        let decoded = decode_property_read_dispatch(&instructions, base).unwrap();
+        assert_eq!(decoded.instance, base + 0x781f4);
+        assert_eq!(decoded.method, base - 0x20940);
+        assert_eq!(decoded.callback_adapter, Some(base + 100));
+    }
+
+    #[test]
+    fn adapted_callback_rejects_changed_frames_arguments_and_control_flow() {
+        let original = adapted_callback_wrapper();
+        for length in 0..original.len() {
+            assert!(decode_property_read_dispatch(&original[..length], 0x95824).is_err());
+        }
+        for index in 0..original.len() {
+            if [7, 13, 15, 24].contains(&index) {
+                continue;
+            }
+            let mut changed = original;
+            changed[index] ^= 0x10;
+            assert!(decode_property_read_dispatch(&changed, 0x95824).is_err());
+        }
+        for index in [7, 13] {
+            let mut changed = original;
+            changed[index] ^= 1; // Wrong instance/adapter argument register.
+            assert!(decode_property_read_dispatch(&changed, 0x95824).is_err());
+        }
+        let mut changed = original;
+        changed[13] = encode_adr(2, 0x95858, 0x9588c);
+        assert!(decode_property_read_dispatch(&changed, 0x95824).is_err());
+        for index in [15, 24] {
+            let mut changed = original;
+            changed[index] ^= 0x8000_0000; // A tail branch cannot restore this frame.
+            assert!(decode_property_read_dispatch(&changed, 0x95824).is_err());
+        }
     }
 
     #[test]
@@ -2338,7 +2538,40 @@ mod tests {
             .map(|mapping| (mapping.start, mapping.end))
             .collect();
 
+        let find: PropertyFind =
+            unsafe { std::mem::transmute(resolve_symbol_address(PROPERTY_FIND_SYMBOL).unwrap()) };
+        let read: PropertyReadCallbackApi = unsafe { std::mem::transmute(target) };
+        let unchanged = [c"ro.build.version.sdk", c"ro.product.cpu.abi"];
+        let baseline: Vec<_> = unchanged
+            .iter()
+            .map(|name| {
+                let property = unsafe { find(name.as_ptr()) };
+                assert!(!property.is_null());
+                let mut probe = PropertyProbe::default();
+                unsafe {
+                    read(
+                        property,
+                        Some(property_probe_callback),
+                        (&mut probe as *mut PropertyProbe).cast(),
+                    );
+                }
+                assert_eq!(probe.calls, 1);
+                probe
+            })
+            .collect();
         assert_eq!(install_inline_property_hook().unwrap(), INLINE_PATCH_BYTES);
+        for (name, expected) in unchanged.iter().zip(baseline) {
+            let property = unsafe { find(name.as_ptr()) };
+            let mut probe = PropertyProbe::default();
+            unsafe {
+                read(
+                    property,
+                    Some(property_probe_callback),
+                    (&mut probe as *mut PropertyProbe).cast(),
+                );
+            }
+            assert_eq!(probe, expected);
+        }
 
         let after = parse_smaps_mappings(&fs::read_to_string("/proc/self/smaps").unwrap());
         let after_target = mapping_containing(&after, target as usize, INLINE_PATCH_BYTES).unwrap();
@@ -2365,6 +2598,8 @@ mod tests {
                 (&mut probe as *mut PropertyProbe).cast(),
             );
         }
+        assert_eq!(probe.calls, 1);
+        assert_eq!(probe.name.as_deref(), Some("ro.build.fingerprint"));
         assert_eq!(
             probe.value.as_deref(),
             Some(test_profile().fingerprint.as_str())
