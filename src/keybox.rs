@@ -2334,6 +2334,29 @@ w1IdYIg2Wxg7yHcQZemFQg==
     }
 
     #[test]
+    fn historical_expiry_check_does_not_relax_new_certificate_acceptance() {
+        let (xml, root) = issued_fixture(true, true, true);
+        let keybox = KeyBox::from_xml_str(&xml).unwrap();
+        let info = keybox.ec_info.as_ref().unwrap();
+        let expiry = info
+            .chain
+            .iter()
+            .map(|item| {
+                parse_x509_certificate(&item.encoded_certificate)
+                    .unwrap()
+                    .1
+                    .validity()
+                    .not_after
+                    .timestamp()
+            })
+            .min()
+            .unwrap();
+        assert!(validate_issued_rkp_xml_at(xml.as_bytes(), &[&root], expiry - 1).is_ok());
+        assert!(validate_issued_rkp_xml_with_roots(xml.as_bytes(), &[&root]).is_err());
+        assert!(validate_issued_rkp_xml_at(xml.as_bytes(), &[&root], expiry + 1).is_err());
+    }
+
+    #[test]
     fn issued_chain_rejects_expired_non_ca_and_wrong_usage() {
         for (ca, expired, usage) in [
             (true, true, true),
