@@ -117,6 +117,13 @@ fn query_activity_packages(uid: u32, pid: u32) -> Result<Vec<String>> {
     // OEMs insert methods into this non-stable AIDL. Read the actual Stub constant
     // from the trusted system framework instead of calling an SDK-based guess.
     contract.transaction = framework::running_processes_transaction()?;
+    contract.layout = if framework::structured_process_records()? {
+        ProcessParcelLayout::Structured
+    } else if sdk >= 34 {
+        ProcessParcelLayout::WithDependencies
+    } else {
+        ProcessParcelLayout::Legacy
+    };
     rsbinder::ProcessState::init_default()
         .map_err(|error| anyhow!("failed to initialize Binder in privileged helper: {error}"))?;
     let binder = require_binder_service(ACTIVITY_SERVICE, hub::try_get_service(ACTIVITY_SERVICE))?;

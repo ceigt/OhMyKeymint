@@ -95,3 +95,95 @@ fn installed_android_framework_contract_is_readable() {
             .is_empty()
     );
 }
+
+fn writer_fixture(operation: &str, range: bool) -> Vec<u8> {
+    let mut data = vec![0u8; 184];
+    data[..8].copy_from_slice(b"dex\n039\0");
+    put(&mut data, 36, 112);
+    put(&mut data, 40, 0x12345678);
+    for (header, count, offset) in [(56, 4, 112), (64, 2, 128), (88, 2, 136), (96, 1, 152)] {
+        put(&mut data, header, count);
+        put(&mut data, header + 4, offset);
+    }
+    for (i, name) in [PROCESS, "Landroid/os/Parcel;", "writeToParcel", operation]
+        .iter()
+        .enumerate()
+    {
+        let offset = data.len() as u32;
+        put(&mut data, 112 + i * 4, offset);
+        data.push(name.len() as u8);
+        data.extend_from_slice(name.as_bytes());
+        data.push(0);
+    }
+    put(&mut data, 128, 0);
+    put(&mut data, 132, 1);
+    put(&mut data, 140, 2);
+    data[144..146].copy_from_slice(&1u16.to_le_bytes());
+    put(&mut data, 148, 3);
+    while data.len() % 4 != 0 {
+        data.push(0);
+    }
+    let code = data.len();
+    data.resize(code + 16, 0);
+    put(&mut data, code + 12, 3);
+    data.extend_from_slice(&(if range { 0x0174u16 } else { 0x106e }).to_le_bytes());
+    data.extend_from_slice(&1u16.to_le_bytes());
+    data.extend_from_slice(&0u16.to_le_bytes());
+    let class_data = data.len() as u32;
+    put(&mut data, 176, class_data);
+    data.extend_from_slice(&[0, 0, 0, 1, 0, 1]);
+    let mut value = code as u32;
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        data.push(byte | if value == 0 { 0 } else { 0x80 });
+        if value == 0 {
+            break;
+        }
+    }
+    let len = data.len() as u32;
+    put(&mut data, 32, len);
+    data
+}
+
+#[test]
+fn installed_writer_format_is_independent_of_sdk_and_transaction_number() {
+    for range in [false, true] {
+        for (operation, structured) in [
+            ("dataPosition", true),
+            ("writeString", false),
+            ("writeString16", false),
+        ] {
+            let data = writer_fixture(operation, range);
+            assert_eq!(
+                Dex::new(&data)
+                    .unwrap()
+                    .structured_process_writer()
+                    .unwrap(),
+                Some(structured)
+            );
+        }
+    }
+    let data = writer_fixture("writeInt", false);
+    assert!(Dex::new(&data)
+        .unwrap()
+        .structured_process_writer()
+        .is_err());
+}
+
+#[test]
+fn truncated_writer_metadata_never_selects_an_ipc_layout() {
+    let data = writer_fixture("dataPosition", false);
+    for size in 0..data.len() {
+        let mut truncated = data[..size].to_vec();
+        if size >= 36 {
+            put(&mut truncated, 32, size as u32);
+        }
+        assert!(
+            Dex::new(&truncated)
+                .and_then(|dex| dex.structured_process_writer())
+                .is_err(),
+            "length {size}"
+        );
+    }
+}

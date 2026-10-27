@@ -6,16 +6,28 @@ use anyhow::{anyhow, bail, Context, Result};
 
 const STUB: &str = "Landroid/app/IActivityManager$Stub;";
 const FIELD: &str = "TRANSACTION_getRunningAppProcesses";
+const PROCESS: &str = "Landroid/app/ActivityManager$RunningAppProcessInfo;";
 const MAX_DEX_SIZE: u64 = 128 * 1024 * 1024;
 
 pub(super) fn running_processes_transaction() -> Result<u32> {
-    static CODE: OnceLock<std::result::Result<u32, String>> = OnceLock::new();
-    CODE.get_or_init(|| read_framework().map_err(|error| format!("{error:#}")))
+    Ok(installed_contract()?.0)
+}
+
+pub(super) fn structured_process_records() -> Result<bool> {
+    Ok(installed_contract()?.1)
+}
+
+fn installed_contract() -> Result<(u32, bool)> {
+    static CONTRACT: OnceLock<std::result::Result<(u32, bool), String>> = OnceLock::new();
+    CONTRACT
+        .get_or_init(|| read_framework().map_err(|error| format!("{error:#}")))
         .clone()
         .map_err(|error| anyhow!(error))
 }
 
-fn read_framework() -> Result<u32> {
+fn read_framework() -> Result<(u32, bool)> {
+    let mut transaction = None;
+    let mut structured = None;
     let mut archive = zip::ZipArchive::new(File::open("/system/framework/framework.jar")?)?;
     for index in 0..archive.len() {
         let mut file = archive.by_index(index)?;
@@ -38,11 +50,18 @@ fn read_framework() -> Result<u32> {
         if data.len() as u64 > MAX_DEX_SIZE {
             bail!("expanded framework DEX exceeds size limit");
         }
-        if let Some(code) = Dex::new(&data)?.transaction()? {
-            return Ok(code);
+        let dex = Dex::new(&data)?;
+        if transaction.is_none() {
+            transaction = dex.transaction()?;
+        }
+        if structured.is_none() {
+            structured = dex.structured_process_writer()?;
+        }
+        if let (Some(code), Some(layout)) = (transaction, structured) {
+            return Ok((code, layout));
         }
     }
-    bail!("ActivityManager transaction constant absent from system framework")
+    bail!("ActivityManager process contract absent from system framework")
 }
 
 struct Dex<'a> {
@@ -193,6 +212,103 @@ impl<'a> Dex<'a> {
             return Ok(Some(code as u32));
         }
         Ok(None)
+    }
+
+    // OEM ROMs may backport the size-prefixed writer without changing SDK_INT.
+    // Inspect the trusted writer's first Parcel operation; never try unknown IPC layouts.
+    fn structured_process_writer(&self) -> Result<Option<bool>> {
+        for index in 0..self.u32(96)? {
+            let definition = self.table(96, 32, index)?;
+            let class = self.u32(definition)?;
+            if !self.type_is(class, PROCESS)? {
+                continue;
+            }
+            let mut cursor = self.u32(definition + 24)? as usize;
+            if cursor == 0 {
+                bail!("process Parcelable has no class data");
+            }
+            let static_fields = self.uleb(&mut cursor)?;
+            let instance_fields = self.uleb(&mut cursor)?;
+            let direct_methods = self.uleb(&mut cursor)?;
+            let virtual_methods = self.uleb(&mut cursor)?;
+            let fields = static_fields
+                .checked_add(instance_fields)
+                .context("field count overflow")?;
+            if fields > self.u32(80)?
+                || direct_methods > self.u32(88)?
+                || virtual_methods > self.u32(88)?
+            {
+                bail!("invalid process Parcelable members");
+            }
+            for _ in 0..fields {
+                self.uleb(&mut cursor)?;
+                self.uleb(&mut cursor)?;
+            }
+            for count in [direct_methods, virtual_methods] {
+                let mut method_index = 0u32;
+                for _ in 0..count {
+                    method_index = method_index
+                        .checked_add(self.uleb(&mut cursor)?)
+                        .context("method index overflow")?;
+                    self.uleb(&mut cursor)?;
+                    let code = self.uleb(&mut cursor)? as usize;
+                    let method = self.table(88, 8, method_index)?;
+                    if u32::from(self.u16(method)?) == class
+                        && self.string_is(self.u32(method + 4)?, "writeToParcel")?
+                    {
+                        if code == 0 {
+                            bail!("process writer has no bytecode");
+                        }
+                        return self.writer_starts_with_size(code).map(Some);
+                    }
+                }
+            }
+            bail!("process Parcelable has no writer");
+        }
+        Ok(None)
+    }
+
+    fn writer_starts_with_size(&self, code: usize) -> Result<bool> {
+        let units = self.u32(code.checked_add(12).context("code offset overflow")?)? as usize;
+        let start = code.checked_add(16).context("code offset overflow")?;
+        let byte_len = units.checked_mul(2).context("code size overflow")?;
+        self.bytes(start, byte_len)?;
+        let mut position = 0usize;
+        while position < units.min(32) {
+            let instruction = start + position * 2;
+            let opcode = self.u16(instruction)? & 0xff;
+            let width = match opcode {
+                0x00 | 0x01 | 0x04 | 0x07 | 0x0a..=0x0d | 0x12 => 1,
+                0x02 | 0x05 | 0x08 | 0x13 | 0x15 | 0x16 | 0x19 | 0x52..=0x6d => 2,
+                0x03 | 0x06 | 0x09 | 0x14 | 0x17 => 3,
+                0x18 => 5,
+                0x6e | 0x74 => {
+                    if position + 3 > units {
+                        bail!("truncated process writer invocation");
+                    }
+                    let target = self.table(88, 8, u32::from(self.u16(instruction + 2)?))?;
+                    if !self.type_is(u32::from(self.u16(target)?), "Landroid/os/Parcel;")? {
+                        bail!("unsupported process writer delegate");
+                    }
+                    let name = self.u32(target + 4)?;
+                    if self.string_is(name, "dataPosition")? {
+                        return Ok(true);
+                    }
+                    if self.string_is(name, "writeString")?
+                        || self.string_is(name, "writeString16")?
+                    {
+                        return Ok(false);
+                    }
+                    bail!("unsupported process writer first Parcel operation");
+                }
+                _ => bail!("unsupported process writer prologue"),
+            };
+            if position + width > units {
+                bail!("truncated process writer instruction");
+            }
+            position += width;
+        }
+        bail!("process writer has no bounded Parcel operation")
     }
 
     fn skip_value(&self, cursor: &mut usize, depth: u32) -> Result<()> {
